@@ -1,0 +1,1729 @@
+// =========================================================
+// CONFIG
+// =========================================================
+
+const APP_CONFIG = {
+
+  SOURCE_SHEET:
+    'CRM',
+
+  REGISTRATION_SHEET:
+    'ثبت نام همایش',
+
+  HEADER_ROW:
+    1,
+
+  FIRST_DATA_ROW:
+    2
+};
+
+
+// =========================================================
+// WEB APP HEALTH CHECK
+// =========================================================
+
+function doGet() {
+
+  return jsonResponse_({
+
+    success:
+      true,
+
+    status:
+      'online',
+
+    version:
+      'negotiate-course-v1',
+
+    message:
+      'Negotiate Course Telegram webhook is ready'
+  });
+}
+
+
+// =========================================================
+// TELEGRAM BOT → CRM
+// =========================================================
+
+function doPost(e) {
+
+  const lock =
+    LockService.getScriptLock();
+
+
+  try {
+
+    lock.waitLock(
+      30000
+    );
+
+
+    // =====================================================
+    // 1) REQUEST
+    // =====================================================
+
+    if (
+      !e ||
+      !e.postData ||
+      !e.postData.contents
+    ) {
+
+      return jsonResponse_({
+
+        success:
+          false,
+
+        error:
+          'EMPTY_REQUEST'
+      });
+    }
+
+
+    let data;
+
+
+    try {
+
+      data =
+        JSON.parse(
+          e.postData.contents
+        );
+
+    } catch (error) {
+
+      return jsonResponse_({
+
+        success:
+          false,
+
+        error:
+          'INVALID_JSON'
+      });
+    }
+
+
+    // =====================================================
+    // 2) SECRET
+    // =====================================================
+
+    const expectedSecret =
+      PropertiesService
+        .getScriptProperties()
+        .getProperty(
+          'HERMES_WEBHOOK_SECRET'
+        );
+
+
+    if (!expectedSecret) {
+
+      return jsonResponse_({
+
+        success:
+          false,
+
+        error:
+          'SERVER_SECRET_NOT_CONFIGURED'
+      });
+    }
+
+
+    if (
+      !data.secret ||
+      data.secret !== expectedSecret
+    ) {
+
+      return jsonResponse_({
+
+        success:
+          false,
+
+        error:
+          'UNAUTHORIZED'
+      });
+    }
+
+
+    // =====================================================
+    // 3) CRM SHEET
+    // =====================================================
+
+    const ss =
+      SpreadsheetApp
+        .getActiveSpreadsheet();
+
+
+    const sheet =
+      ss.getSheetByName(
+        APP_CONFIG.SOURCE_SHEET
+      );
+
+
+    if (!sheet) {
+
+      return jsonResponse_({
+
+        success:
+          false,
+
+        error:
+          'SHEET_NOT_FOUND',
+
+        message:
+          'Sheet not found: ' +
+          APP_CONFIG.SOURCE_SHEET
+      });
+    }
+
+
+    // =====================================================
+    // 4) HEADERS
+    // =====================================================
+
+    const headers =
+      getHeadersByName_(
+        sheet,
+        APP_CONFIG.HEADER_ROW
+      );
+
+
+    const instagramColumn =
+      headers[
+        normalizeText_(
+          'ID'
+        )
+      ];
+
+
+    const phoneColumn =
+      headers[
+        normalizeText_(
+          'شماره تماس'
+        )
+      ];
+
+
+    if (!instagramColumn) {
+
+      return jsonResponse_({
+
+        success:
+          false,
+
+        error:
+          'ID_COLUMN_NOT_FOUND'
+      });
+    }
+
+
+    if (!phoneColumn) {
+
+      return jsonResponse_({
+
+        success:
+          false,
+
+        error:
+          'PHONE_COLUMN_NOT_FOUND'
+      });
+    }
+
+
+    // =====================================================
+    // 5) NORMALIZED INPUT
+    // =====================================================
+
+    const incomingInstagram =
+      normalizeInstagram_(
+        data.instagramId
+      );
+
+
+    const incomingPhone =
+      normalizePhone_(
+        data.phoneNumber
+      );
+
+
+    // =====================================================
+    // 6) DUPLICATE CHECK
+    // =====================================================
+
+    const lastRow =
+      sheet.getLastRow();
+
+
+    if (
+      lastRow >=
+      APP_CONFIG.FIRST_DATA_ROW
+    ) {
+
+      const rowCount =
+        lastRow -
+        APP_CONFIG.FIRST_DATA_ROW +
+        1;
+
+
+      const instagramValues =
+        sheet
+          .getRange(
+            APP_CONFIG.FIRST_DATA_ROW,
+            instagramColumn,
+            rowCount,
+            1
+          )
+          .getDisplayValues();
+
+
+      const phoneValues =
+        sheet
+          .getRange(
+            APP_CONFIG.FIRST_DATA_ROW,
+            phoneColumn,
+            rowCount,
+            1
+          )
+          .getDisplayValues();
+
+
+      for (
+        let i = 0;
+        i < rowCount;
+        i++
+      ) {
+
+        const row =
+          APP_CONFIG.FIRST_DATA_ROW +
+          i;
+
+
+        const existingInstagram =
+          normalizeInstagram_(
+            instagramValues[i][0]
+          );
+
+
+        const existingPhone =
+          normalizePhone_(
+            phoneValues[i][0]
+          );
+
+
+        // ---------------------------------------------
+        // Instagram duplicate
+        // ---------------------------------------------
+
+        if (
+          incomingInstagram &&
+          existingInstagram &&
+          incomingInstagram ===
+          existingInstagram
+        ) {
+
+          return jsonResponse_({
+
+            success:
+              false,
+
+            duplicate:
+              true,
+
+            duplicateBy:
+              'instagramId',
+
+            row:
+              row,
+
+            value:
+              data.instagramId || '',
+
+            message:
+              `این ID قبلاً در ردیف ${row} ثبت شده است.`
+          });
+        }
+
+
+        // ---------------------------------------------
+        // Phone duplicate
+        // ---------------------------------------------
+
+        if (
+          incomingPhone &&
+          existingPhone &&
+          incomingPhone ===
+          existingPhone
+        ) {
+
+          return jsonResponse_({
+
+            success:
+              false,
+
+            duplicate:
+              true,
+
+            duplicateBy:
+              'phoneNumber',
+
+            row:
+              row,
+
+            value:
+              data.phoneNumber || '',
+
+            message:
+              `این شماره تماس قبلاً در ردیف ${row} ثبت شده است.`
+          });
+        }
+      }
+    }
+
+
+    // =====================================================
+    // 7) FIRST EMPTY CRM ROW
+    // =====================================================
+
+    const targetRow =
+      findFirstEmptyRowByColumn_(
+        sheet,
+        instagramColumn,
+        APP_CONFIG.FIRST_DATA_ROW
+      );
+
+
+    // =====================================================
+    // 8) BOT JSON → CRM
+    // =====================================================
+
+    const FIELD_MAPPING = {
+
+      instagramId:
+        'ID',
+
+      fullName:
+        'نام و نام خانوادگی',
+
+      phoneNumber:
+        'شماره تماس',
+
+      job:
+        'شغل',
+
+      employeeCount:
+        'تعداد پرسنل',
+
+      city:
+        'شهر',
+
+      challenge:
+        'چالش',
+
+      description:
+        'توضیحات'
+    };
+
+
+    // =====================================================
+    // 9) WRITE CRM
+    // =====================================================
+
+    for (
+      const [jsonField, sheetField]
+      of Object.entries(
+        FIELD_MAPPING
+      )
+    ) {
+
+      const column =
+        headers[
+          normalizeText_(
+            sheetField
+          )
+        ];
+
+
+      if (!column) {
+        continue;
+      }
+
+
+      const value =
+        data[jsonField] ?? '';
+
+
+      sheet
+        .getRange(
+          targetRow,
+          column
+        )
+        .setValue(
+          value
+        );
+    }
+
+
+    SpreadsheetApp.flush();
+
+
+    // =====================================================
+    // 10) SUCCESS
+    // =====================================================
+
+    return jsonResponse_({
+
+      success:
+        true,
+
+      duplicate:
+        false,
+
+      row:
+        targetRow,
+
+      message:
+        'اطلاعات با موفقیت ثبت شد.'
+    });
+
+
+  } catch (error) {
+
+    return jsonResponse_({
+
+      success:
+        false,
+
+      error:
+        error &&
+        error.message
+          ? error.message
+          : String(error)
+    });
+
+
+  } finally {
+
+    try {
+
+      lock.releaseLock();
+
+    } catch (_) {
+    }
+  }
+}
+
+
+// =========================================================
+// TRANSFER 1
+//
+// ردیف یا ردیف‌های انتخاب‌شده CRM
+// → ثبت نام همایش
+// =========================================================
+
+function sendToRegistration() {
+
+  const ss =
+    SpreadsheetApp
+      .getActiveSpreadsheet();
+
+
+  const sourceSheet =
+    ss.getSheetByName(
+      APP_CONFIG.SOURCE_SHEET
+    );
+
+
+  const targetSheet =
+    ss.getSheetByName(
+      APP_CONFIG.REGISTRATION_SHEET
+    );
+
+
+  if (
+    !sourceSheet ||
+    !targetSheet
+  ) {
+
+    ss.toast(
+      'شیت CRM یا ثبت نام همایش پیدا نشد.',
+      'خطا',
+      5
+    );
+
+    return;
+  }
+
+
+  // باید روی CRM باشیم
+  if (
+    ss.getActiveSheet()
+      .getName() !==
+    APP_CONFIG.SOURCE_SHEET
+  ) {
+
+    ss.toast(
+      'ابتدا در شیت CRM ردیف‌ها را انتخاب کنید.',
+      'انتخاب نامعتبر',
+      5
+    );
+
+    return;
+  }
+
+
+  const rangeList =
+    sourceSheet
+      .getActiveRangeList();
+
+
+  if (!rangeList) {
+
+    ss.toast(
+      'هیچ ردیفی انتخاب نشده است.',
+      'انتخاب نامعتبر',
+      5
+    );
+
+    return;
+  }
+
+
+  const ranges =
+    rangeList.getRanges();
+
+
+  // =====================================================
+  // همه ردیف‌های انتخاب‌شده
+  // Ctrl selection هم پشتیبانی می‌شود
+  // =====================================================
+
+  const selectedRowsSet =
+    new Set();
+
+
+  ranges.forEach(
+    range => {
+
+      const startRow =
+        range.getRow();
+
+
+      const rowCount =
+        range.getNumRows();
+
+
+      for (
+        let i = 0;
+        i < rowCount;
+        i++
+      ) {
+
+        const row =
+          startRow + i;
+
+
+        if (
+          row >=
+          APP_CONFIG.FIRST_DATA_ROW
+        ) {
+
+          selectedRowsSet.add(
+            row
+          );
+        }
+      }
+    }
+  );
+
+
+  const selectedRows =
+    Array
+      .from(
+        selectedRowsSet
+      )
+      .sort(
+        (a, b) =>
+          a - b
+      );
+
+
+  if (
+    selectedRows.length === 0
+  ) {
+
+    ss.toast(
+      'هیچ ردیف اطلاعاتی معتبری انتخاب نشده است.',
+      'انتخاب نامعتبر',
+      5
+    );
+
+    return;
+  }
+
+
+  const sourceHeaders =
+    getHeadersByName_(
+      sourceSheet,
+      APP_CONFIG.HEADER_ROW
+    );
+
+
+  const targetHeaders =
+    getHeadersByName_(
+      targetSheet,
+      APP_CONFIG.HEADER_ROW
+    );
+
+
+  // =====================================================
+  // FIELD MAPPING
+  // =====================================================
+
+  const FIELD_MAPPING = {
+
+    'نام و نام خانوادگی':
+      'نام و نام خانوادگی',
+
+    'شماره تماس':
+      'شماره تماس',
+
+    'شغل':
+      'شغل',
+
+    'شهر':
+      'شهر',
+
+    'تعداد پرسنل':
+      'تعداد پرسنل'
+  };
+
+
+  const targetNameColumn =
+    targetHeaders[
+      normalizeText_(
+        'نام و نام خانوادگی'
+      )
+    ];
+
+
+  if (!targetNameColumn) {
+
+    ss.toast(
+      'ستون «نام و نام خانوادگی» در شیت ثبت نام همایش پیدا نشد.',
+      'خطا',
+      6
+    );
+
+    return;
+  }
+
+
+  let targetRow =
+    findFirstEmptyRowByColumn_(
+      targetSheet,
+      targetNameColumn,
+      2
+    );
+
+
+  let copied =
+    0;
+
+
+  const skippedRows =
+    [];
+
+
+  // =====================================================
+  // COPY SELECTED ROWS
+  // =====================================================
+
+  for (
+    const sourceRow
+    of selectedRows
+  ) {
+
+    // فقط ردیف کاملاً خالی رد شود
+    if (
+      !rowHasAnyData_(
+        sourceSheet,
+        sourceRow
+      )
+    ) {
+
+      skippedRows.push(
+        sourceRow
+      );
+
+      continue;
+    }
+
+
+    for (
+      const [
+        sourceField,
+        targetField
+      ]
+      of Object.entries(
+        FIELD_MAPPING
+      )
+    ) {
+
+      const sourceColumn =
+        sourceHeaders[
+          normalizeText_(
+            sourceField
+          )
+        ];
+
+
+      const targetColumn =
+        targetHeaders[
+          normalizeText_(
+            targetField
+          )
+        ];
+
+
+      if (
+        !sourceColumn ||
+        !targetColumn
+      ) {
+
+        continue;
+      }
+
+
+      const value =
+        sourceSheet
+          .getRange(
+            sourceRow,
+            sourceColumn
+          )
+          .getValue();
+
+
+      targetSheet
+        .getRange(
+          targetRow,
+          targetColumn
+        )
+        .setValue(
+          value
+        );
+    }
+
+
+    copied++;
+
+
+    targetRow =
+      findFirstEmptyRowByColumn_(
+        targetSheet,
+        targetNameColumn,
+        targetRow + 1
+      );
+  }
+
+
+  SpreadsheetApp.flush();
+
+
+  let message =
+    `${copied} ردیف با موفقیت منتقل شد.`;
+
+
+  if (
+    skippedRows.length > 0
+  ) {
+
+    message +=
+      ` ردیف‌های ${skippedRows.join('، ')} خالی بودند و منتقل نشدند.`;
+  }
+
+
+  ss.toast(
+    message,
+    '✅ انتقال انجام شد',
+    7
+  );
+}
+
+
+// =========================================================
+// TRANSFER 2
+//
+// CRM
+// فقط افرادی که دقیقاً یک «ثبت نام شده» دارند
+// → ثبت نام همایش
+//
+// مقدار ستون فروش = تماس گیرنده متناظر
+// =========================================================
+
+function sendToRegistrationFilteredData() {
+
+  const ss =
+    SpreadsheetApp
+      .getActiveSpreadsheet();
+
+
+  const sourceSheet =
+    ss.getSheetByName(
+      APP_CONFIG.SOURCE_SHEET
+    );
+
+
+  const targetSheet =
+    ss.getSheetByName(
+      APP_CONFIG.REGISTRATION_SHEET
+    );
+
+
+  if (
+    !sourceSheet ||
+    !targetSheet
+  ) {
+
+    ss.toast(
+      'شیت CRM یا ثبت نام همایش پیدا نشد.',
+      'خطا',
+      5
+    );
+
+    return;
+  }
+
+
+  const sourceHeaders =
+    getHeadersByName_(
+      sourceSheet,
+      APP_CONFIG.HEADER_ROW
+    );
+
+
+  const targetHeaders =
+    getHeadersByName_(
+      targetSheet,
+      APP_CONFIG.HEADER_ROW
+    );
+
+
+  // =====================================================
+  // NORMAL FIELDS
+  // =====================================================
+
+  const FIELD_MAPPING = {
+
+    'نام و نام خانوادگی':
+      'نام و نام خانوادگی',
+
+    'شماره تماس':
+      'شماره تماس',
+
+    'شغل':
+      'شغل',
+
+    'شهر':
+      'شهر',
+
+    'تعداد پرسنل':
+      'تعداد پرسنل'
+  };
+
+
+  // =====================================================
+  // CALLER / RESULT PAIRS
+  // =====================================================
+
+  const CALL_RESULTS = [
+
+    {
+      caller:
+        'تماس گیرنده اول',
+
+      result:
+        'نتیجه اول'
+    },
+
+    {
+      caller:
+        'تماس گیرنده دوم',
+
+      result:
+        'نتیجه دوم'
+    },
+
+    {
+      caller:
+        'تماس گیرنده سوم',
+
+      result:
+        'نتیجه سوم'
+    },
+
+    {
+      caller:
+        'تماس گیرنده چهارم',
+
+      result:
+        'نتیجه چهارم'
+    },
+
+    {
+      caller:
+        'تماس گیرنده پنجم',
+
+      result:
+        'نتیجه پنجم'
+    }
+  ];
+
+
+  const targetNameColumn =
+    targetHeaders[
+      normalizeText_(
+        'نام و نام خانوادگی'
+      )
+    ];
+
+
+  const targetSalesColumn =
+    targetHeaders[
+      normalizeText_(
+        'فروش'
+      )
+    ];
+
+
+  if (!targetNameColumn) {
+
+    ss.toast(
+      'ستون «نام و نام خانوادگی» در مقصد پیدا نشد.',
+      'خطا',
+      6
+    );
+
+    return;
+  }
+
+
+  if (!targetSalesColumn) {
+
+    ss.toast(
+      'ستون «فروش» در شیت ثبت نام همایش پیدا نشد.',
+      'خطا',
+      6
+    );
+
+    return;
+  }
+
+
+  // =====================================================
+  // کنترل وجود ستون‌های Caller / Result
+  // =====================================================
+
+  for (
+    const pair
+    of CALL_RESULTS
+  ) {
+
+    const callerColumn =
+      sourceHeaders[
+        normalizeText_(
+          pair.caller
+        )
+      ];
+
+
+    const resultColumn =
+      sourceHeaders[
+        normalizeText_(
+          pair.result
+        )
+      ];
+
+
+    if (
+      !callerColumn ||
+      !resultColumn
+    ) {
+
+      ss.toast(
+        `ستون «${pair.caller}» یا «${pair.result}» پیدا نشد.`,
+        'خطا',
+        8
+      );
+
+      return;
+    }
+  }
+
+
+  const lastRow =
+    sourceSheet
+      .getLastRow();
+
+
+  if (
+    lastRow <
+    APP_CONFIG.FIRST_DATA_ROW
+  ) {
+
+    ss.toast(
+      'داده‌ای برای بررسی وجود ندارد.',
+      'اطلاعات',
+      5
+    );
+
+    return;
+  }
+
+
+  let targetRow =
+    findFirstEmptyRowByColumn_(
+      targetSheet,
+      targetNameColumn,
+      2
+    );
+
+
+  let copied =
+    0;
+
+
+  const multipleRegistration =
+    [];
+
+
+  const emptyCaller =
+    [];
+
+
+  // =====================================================
+  // CHECK ALL CRM ROWS
+  // =====================================================
+
+  for (
+    let sourceRow =
+      APP_CONFIG.FIRST_DATA_ROW;
+
+    sourceRow <= lastRow;
+
+    sourceRow++
+  ) {
+
+    if (
+      !rowHasAnyData_(
+        sourceSheet,
+        sourceRow
+      )
+    ) {
+
+      continue;
+    }
+
+
+    const matches =
+      [];
+
+
+    // ===================================================
+    // CHECK RESULT 1..5
+    // ===================================================
+
+    for (
+      const pair
+      of CALL_RESULTS
+    ) {
+
+      const callerColumn =
+        sourceHeaders[
+          normalizeText_(
+            pair.caller
+          )
+        ];
+
+
+      const resultColumn =
+        sourceHeaders[
+          normalizeText_(
+            pair.result
+          )
+        ];
+
+
+      const resultValue =
+        normalizeStatus_(
+          sourceSheet
+            .getRange(
+              sourceRow,
+              resultColumn
+            )
+            .getDisplayValue()
+        );
+
+
+      if (
+        resultValue ===
+        'ثبت نام شده'
+      ) {
+
+        const callerValue =
+          normalizeText_(
+            sourceSheet
+              .getRange(
+                sourceRow,
+                callerColumn
+              )
+              .getDisplayValue()
+          );
+
+
+        matches.push({
+
+          callerValue:
+            callerValue,
+
+          resultField:
+            pair.result
+        });
+      }
+    }
+
+
+    // هیچ ثبت نام شده‌ای ندارد
+    if (
+      matches.length === 0
+    ) {
+
+      continue;
+    }
+
+
+    // بیش از یک نتیجه ثبت نام شده
+    if (
+      matches.length > 1
+    ) {
+
+      multipleRegistration.push(
+        sourceRow
+      );
+
+      continue;
+    }
+
+
+    const match =
+      matches[0];
+
+
+    // Caller متناظر خالی
+    if (
+      !match.callerValue
+    ) {
+
+      emptyCaller.push(
+        sourceRow
+      );
+
+      continue;
+    }
+
+
+    // ===================================================
+    // COPY NORMAL FIELDS
+    // ===================================================
+
+    for (
+      const [
+        sourceField,
+        targetField
+      ]
+      of Object.entries(
+        FIELD_MAPPING
+      )
+    ) {
+
+      const sourceColumn =
+        sourceHeaders[
+          normalizeText_(
+            sourceField
+          )
+        ];
+
+
+      const targetColumn =
+        targetHeaders[
+          normalizeText_(
+            targetField
+          )
+        ];
+
+
+      if (
+        !sourceColumn ||
+        !targetColumn
+      ) {
+
+        continue;
+      }
+
+
+      const value =
+        sourceSheet
+          .getRange(
+            sourceRow,
+            sourceColumn
+          )
+          .getValue();
+
+
+      targetSheet
+        .getRange(
+          targetRow,
+          targetColumn
+        )
+        .setValue(
+          value
+        );
+    }
+
+
+    // ===================================================
+    // SALES = MATCHED CALLER
+    // ===================================================
+
+    targetSheet
+      .getRange(
+        targetRow,
+        targetSalesColumn
+      )
+      .setValue(
+        match.callerValue
+      );
+
+
+    copied++;
+
+
+    targetRow =
+      findFirstEmptyRowByColumn_(
+        targetSheet,
+        targetNameColumn,
+        targetRow + 1
+      );
+  }
+
+
+  SpreadsheetApp.flush();
+
+
+  // =====================================================
+  // RESULT
+  // =====================================================
+
+  let message =
+    `${copied} نفر با موفقیت منتقل شدند.`;
+
+
+  if (
+    multipleRegistration.length > 0
+  ) {
+
+    message +=
+      `\nبیش از یک «ثبت نام شده»: ردیف‌های ${multipleRegistration.join('، ')}`;
+  }
+
+
+  if (
+    emptyCaller.length > 0
+  ) {
+
+    message +=
+      `\nتماس گیرنده خالی: ردیف‌های ${emptyCaller.join('، ')}`;
+  }
+
+
+  ss.toast(
+    message,
+    '✅ انتقال ثبت نام شده‌ها',
+    10
+  );
+}
+
+
+// =========================================================
+// HEADER MAP
+// =========================================================
+
+function getHeadersByName_(
+  sheet,
+  headerRow
+) {
+
+  const lastColumn =
+    sheet.getLastColumn();
+
+
+  const headers =
+    sheet
+      .getRange(
+        headerRow,
+        1,
+        1,
+        lastColumn
+      )
+      .getDisplayValues()[0];
+
+
+  const result =
+    {};
+
+
+  headers.forEach(
+    (header, index) => {
+
+      const normalized =
+        normalizeText_(
+          header
+        );
+
+
+      if (normalized) {
+
+        result[normalized] =
+          index + 1;
+      }
+    }
+  );
+
+
+  return result;
+}
+
+
+// =========================================================
+// FIRST EMPTY ROW
+// =========================================================
+
+function findFirstEmptyRowByColumn_(
+  sheet,
+  column,
+  startRow
+) {
+
+  const lastRow =
+    Math.max(
+      sheet.getLastRow(),
+      startRow
+    );
+
+
+  const rowCount =
+    lastRow -
+    startRow +
+    1;
+
+
+  const values =
+    sheet
+      .getRange(
+        startRow,
+        column,
+        rowCount,
+        1
+      )
+      .getDisplayValues();
+
+
+  for (
+    let i = 0;
+    i < values.length;
+    i++
+  ) {
+
+    if (
+      normalizeText_(
+        values[i][0]
+      ) === ''
+    ) {
+
+      return startRow + i;
+    }
+  }
+
+
+  return lastRow + 1;
+}
+
+
+// =========================================================
+// ROW HAS DATA
+// =========================================================
+
+function rowHasAnyData_(
+  sheet,
+  row
+) {
+
+  const lastColumn =
+    sheet.getLastColumn();
+
+
+  const values =
+    sheet
+      .getRange(
+        row,
+        1,
+        1,
+        lastColumn
+      )
+      .getDisplayValues()[0];
+
+
+  return values.some(
+    value =>
+      normalizeText_(
+        value
+      ) !== ''
+  );
+}
+
+
+// =========================================================
+// NORMALIZE STATUS
+// =========================================================
+
+function normalizeStatus_(
+  value
+) {
+
+  return String(
+    value || ''
+  )
+    .trim()
+    .replace(
+      /\u200c/g,
+      ' '
+    )
+    .replace(
+      /ي/g,
+      'ی'
+    )
+    .replace(
+      /ك/g,
+      'ک'
+    )
+    .replace(
+      /\s+/g,
+      ' '
+    );
+}
+
+
+// =========================================================
+// NORMALIZE TEXT
+// =========================================================
+
+function normalizeText_(
+  value
+) {
+
+  if (
+    value === null ||
+    value === undefined
+  ) {
+
+    return '';
+  }
+
+
+  return String(value)
+    .trim()
+    .replace(
+      /ي/g,
+      'ی'
+    )
+    .replace(
+      /ك/g,
+      'ک'
+    )
+    .replace(
+      /\s+/g,
+      ' '
+    );
+}
+
+
+// =========================================================
+// NORMALIZE INSTAGRAM
+// =========================================================
+
+function normalizeInstagram_(
+  value
+) {
+
+  let text =
+    normalizeText_(
+      value
+    )
+      .toLowerCase();
+
+
+  if (!text) {
+
+    return '';
+  }
+
+
+  text =
+    text.replace(
+      /^@+/,
+      ''
+    );
+
+
+  text =
+    text.replace(
+      /^https?:\/\/(www\.)?instagram\.com\//,
+      ''
+    );
+
+
+  text =
+    text
+      .split('?')[0]
+      .split('#')[0]
+      .replace(
+        /^\/+|\/+$/g,
+        ''
+      );
+
+
+  return text;
+}
+
+
+// =========================================================
+// NORMALIZE PHONE
+// =========================================================
+
+function normalizePhone_(
+  value
+) {
+
+  let text =
+    String(
+      value || ''
+    )
+      .trim();
+
+
+  // Persian digits
+
+  text =
+    text.replace(
+      /[۰-۹]/g,
+      digit =>
+        String(
+          '۰۱۲۳۴۵۶۷۸۹'
+            .indexOf(
+              digit
+            )
+        )
+    );
+
+
+  // Arabic digits
+
+  text =
+    text.replace(
+      /[٠-٩]/g,
+      digit =>
+        String(
+          '٠١٢٣٤٥٦٧٨٩'
+            .indexOf(
+              digit
+            )
+        )
+    );
+
+
+  // فقط رقم
+
+  text =
+    text.replace(
+      /\D/g,
+      ''
+    );
+
+
+  if (!text) {
+
+    return '';
+  }
+
+
+  // 0098912... → 0912...
+
+  if (
+    text.startsWith(
+      '0098'
+    )
+  ) {
+
+    text =
+      '0' +
+      text.substring(
+        4
+      );
+  }
+
+
+  // 98912... → 0912...
+
+  else if (
+    text.startsWith(
+      '98'
+    ) &&
+    text.length === 12
+  ) {
+
+    text =
+      '0' +
+      text.substring(
+        2
+      );
+  }
+
+
+  return text;
+}
+
+function toEnglishDigits_(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  return String(value)
+    .replace(/[۰-۹]/g, d => "۰۱۲۳۴۵۶۷۸۹".indexOf(d))
+    .replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d));
+}
+
+// =========================================================
+// JSON RESPONSE
+// =========================================================
+
+function jsonResponse_(
+  data
+) {
+
+  return ContentService
+    .createTextOutput(
+      JSON.stringify(
+        data
+      )
+    )
+    .setMimeType(
+      ContentService.MimeType.JSON
+    );
+}
