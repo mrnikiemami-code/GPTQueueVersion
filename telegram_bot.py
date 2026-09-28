@@ -134,6 +134,11 @@ GOOGLE_AUTO_POST_RETRY_COUNT = 0
 # timeout پیام‌های وضعیت Telegram
 TELEGRAM_STATUS_MESSAGE_TIMEOUT_SECONDS = 8
 
+# Hard upper bound for one Vision job as observed by the Telegram worker.
+# The underlying Bridge call runs in a worker thread, so the outer asyncio
+# timeout is authoritative and prevents the queue from hanging indefinitely.
+VISION_JOB_TIMEOUT_SECONDS = 50
+
 # =========================================================
 # TELEGRAM NETWORK SETTINGS
 #
@@ -2899,9 +2904,12 @@ async def _process_queued_job(application, queue_job):
 
     try:
         async with processing_lock:
-            data = await asyncio.to_thread(
-                analyze_image_via_bridge,
-                image_path,
+            data = await asyncio.wait_for(
+                asyncio.to_thread(
+                    analyze_image_via_bridge,
+                    image_path,
+                ),
+                timeout=VISION_JOB_TIMEOUT_SECONDS,
             )
 
         print("")
@@ -2918,8 +2926,37 @@ async def _process_queued_job(application, queue_job):
             visionAttempts=attempts,
         )
 
-    except (TimeoutError, json.JSONDecodeError) as ex:
-        # Two automatic Vision attempts total. The original image is never lost.
+    except TimeoutError as ex:
+        # A Vision job must never hold the serial queue for more than the
+        # configured hard timeout. Do not auto-requeue timeouts, otherwise the
+        # user could wait another full timeout window for the same image.
+        timeout_error = (
+            f"Vision processing exceeded {VISION_JOB_TIMEOUT_SECONDS} seconds."
+        )
+        update_persisted_job(
+            job_path,
+            status="vision_failed",
+            destination=destination,
+            lastError=timeout_error,
+            visionAttempts=attempts,
+        )
+        await _safe_bot_send(
+            application.bot,
+            chat_id,
+            f"⏱️ پردازش تصویر پس از {VISION_JOB_TIMEOUT_SECONDS} ثانیه متوقف شد. "
+            "عکس محفوظ مانده است و دوباره خودکار پردازش نمی‌شود.\n"
+            f"Job ID: {job_id}",
+        )
+        print(
+            "VISION HARD TIMEOUT:",
+            job_id,
+            str(ex),
+        )
+        _db_mark_batch_done_if_complete(batch_id)
+        return
+
+    except json.JSONDecodeError as ex:
+        # Invalid JSON may still be transient, so keep the existing one retry.
         if attempts < 2:
             update_persisted_job(
                 job_path,
@@ -2931,7 +2968,7 @@ async def _process_queued_job(application, queue_job):
             await _safe_bot_send(
                 application.bot,
                 chat_id,
-                f"⚠️ Vision موقتاً پاسخ نداد؛ عکس محفوظ است و یک بار دیگر تلاش می‌شود.\n"
+                "⚠️ پاسخ Vision معتبر نبود؛ عکس محفوظ است و یک بار دیگر تلاش می‌شود.\n"
                 f"Job ID: {job_id}",
             )
         else:
@@ -2945,7 +2982,7 @@ async def _process_queued_job(application, queue_job):
             await _safe_bot_send(
                 application.bot,
                 chat_id,
-                f"⚠️ Vision بعد از دو تلاش کامل نشد. عکس محفوظ مانده است.\n"
+                "⚠️ Vision بعد از دو تلاش پاسخ معتبر نداد. عکس محفوظ مانده است.\n"
                 f"Job ID: {job_id}",
             )
         _db_mark_batch_done_if_complete(batch_id)
