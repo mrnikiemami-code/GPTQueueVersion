@@ -512,7 +512,8 @@ def _db_finalize_batch_waiting_destination(batch_id, prompt_message_id=None):
                 prompt_message_id = ?,
                 updated_at = ?
             WHERE batch_id = ?
-              AND state = 'collecting'
+              AND state IN ('collecting', 'waiting_destination')
+              AND prompt_message_id IS NULL
             """,
             (prompt_message_id, _utc_now_iso(), batch_id),
         )
@@ -681,7 +682,13 @@ def _db_get_batches_needing_prompt():
             """
             SELECT b.*
             FROM batches b
-            WHERE b.state IN ('collecting', 'waiting_destination')
+            WHERE (
+                    b.state = 'collecting'
+                    OR (
+                        b.state = 'waiting_destination'
+                        AND b.prompt_message_id IS NULL
+                    )
+                  )
               AND EXISTS (
                   SELECT 1
                   FROM queue_jobs q
@@ -762,6 +769,12 @@ async def _recover_destination_prompts(application):
 
     for batch in batches:
         batch_id = batch["batch_id"]
+
+        # A batch that already has a destination prompt must never be
+        # prompted again during restart recovery.
+        if batch.get("prompt_message_id") is not None:
+            continue
+
         count = await asyncio.to_thread(
             _db_count_batch_jobs,
             batch_id,
