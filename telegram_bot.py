@@ -3020,6 +3020,18 @@ async def _process_queued_job(application, queue_job):
             lastError=None,
         )
 
+        destination_label = DESTINATION_LABELS.get(
+            destination,
+            destination,
+        )
+
+        await _safe_bot_send(
+            application.bot,
+            chat_id,
+            f"⏳ اطلاعات استخراج شد. در حال ارسال به «{destination_label}»...\n"
+            f"Job ID: {job_id}",
+        )
+
         google_response = await asyncio.to_thread(
             send_to_google_sheet_sync,
             data,
@@ -3335,8 +3347,7 @@ async def handle_photo(
 
         await safe_reply(
             update,
-            "✅ عکس با موفقیت ذخیره شد.\n"
-            "اگر عکس دیگری هم مربوط به همین ارسال است، الان بفرست."
+            "✅ عکس با موفقیت ذخیره شد."
         )
 
         _schedule_batch_finalize(
