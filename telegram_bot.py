@@ -1674,12 +1674,17 @@ def get_retryable_jobs_for_user(user_id):
     deduped_jobs = []
     seen_instagrams = set()
     seen_phones = set()
+    seen_telegram_file_ids = set()
 
     for job in jobs:
 
         instagram_id, phone = _retry_identity_values(
             job
         )
+
+        telegram_file_id = str(
+            job.get("telegramFileId") or ""
+        ).strip()
 
         duplicate_lead = False
 
@@ -1692,6 +1697,16 @@ def get_retryable_jobs_for_user(user_id):
         if (
             phone
             and phone in seen_phones
+        ):
+            duplicate_lead = True
+
+        # Vision-failed jobs have no extracted identity yet. In that state,
+        # Telegram's file_id is the best stable identity we already persist
+        # for detecting the exact same photo across repeated submissions.
+        if (
+            job.get("status") == "vision_failed"
+            and telegram_file_id
+            and telegram_file_id in seen_telegram_file_ids
         ):
             duplicate_lead = True
 
@@ -1712,6 +1727,14 @@ def get_retryable_jobs_for_user(user_id):
                 phone
             )
 
+        if (
+            job.get("status") == "vision_failed"
+            and telegram_file_id
+        ):
+            seen_telegram_file_ids.add(
+                telegram_file_id
+            )
+
     return deduped_jobs
 
 
@@ -1730,6 +1753,10 @@ def _retry_job_label(job, number):
         data.get("instagramId") or ""
     ).strip()
 
+    status = str(
+        job.get("status") or ""
+    ).strip()
+
     identity_parts = []
 
     if full_name:
@@ -1740,6 +1767,45 @@ def _retry_job_label(job, number):
 
     if not identity_parts and instagram_id:
         identity_parts.append(instagram_id)
+
+    if not identity_parts and status == "vision_failed":
+
+        message_id = str(
+            job.get("telegramMessageId") or ""
+        ).strip()
+
+        destination = str(
+            job.get("destination") or ""
+        ).strip()
+
+        created_at = str(
+            job.get("createdAt") or ""
+        ).strip()
+
+        time_part = ""
+
+        if "T" in created_at:
+            try:
+                time_part = created_at.split("T", 1)[1][:5]
+            except Exception:
+                time_part = ""
+
+        identity_parts.append("Vision failed")
+
+        if message_id:
+            identity_parts.append(
+                f"Msg {message_id}"
+            )
+
+        if time_part:
+            identity_parts.append(
+                time_part
+            )
+
+        if destination:
+            identity_parts.append(
+                destination
+            )
 
     if not identity_parts:
         identity_parts.append("بدون نام")
