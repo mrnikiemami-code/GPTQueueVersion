@@ -1427,13 +1427,42 @@ function getAssistantSnapshot() {
         getAssistantMessageNodes();
 
 
-    const texts =
-        nodes
-            .map(
-                node =>
+    const entries =
+        nodes.map(
+            node => ({
+
+                node,
+
+                text:
                     getAssistantNodeText(
                         node
-                    )
+                    ),
+
+                messageIds:
+                    String(
+                        node.getAttribute(
+                            "data-chatgpt-search-message-ids"
+                        )
+                        ||
+                        node.getAttribute(
+                            "data-content-search-unit-key"
+                        )
+                        ||
+                        node.getAttribute(
+                            "data-chatgpt-search-unit-key"
+                        )
+                        ||
+                        ""
+                    ).trim()
+            })
+        );
+
+
+    const texts =
+        entries
+            .map(
+                entry =>
+                    entry.text
             )
             .filter(
                 Boolean
@@ -1453,15 +1482,13 @@ function getAssistantSnapshot() {
 
         lastText,
 
-        // Keep the actual DOM node references as well as their texts.
-        // Vision must only accept a genuinely new assistant answer after
-        // the prompt is sent; DOM order alone is not a safe correlation.
         nodes,
 
-        texts
+        texts,
+
+        entries
     };
 }
-
 
 function getLatestAssistantText() {
 
@@ -1565,28 +1592,55 @@ async function getReliableVisionReply(
                 getAssistantMessageNodes();
 
 
-            const baselineNodes =
-                new Set(
-                    Array.isArray(
-                        assistantBaseline?.nodes
-                    )
-                        ? assistantBaseline.nodes
-                        : []
-                );
+            const baselineEntries =
+                Array.isArray(
+                    assistantBaseline?.entries
+                )
+                    ? assistantBaseline.entries
+                    : [];
 
 
-            const baselineTexts =
-                new Set(
-                    Array.isArray(
-                        assistantBaseline?.texts
-                    )
-                        ? assistantBaseline.texts
-                        : (
-                            assistantBaseline?.lastText
-                                ? [assistantBaseline.lastText]
-                                : []
+            const baselineNodeMap =
+                new Map();
+
+
+            const baselineMessageIds =
+                new Set();
+
+
+            for (
+                const entry
+                of baselineEntries
+            ) {
+
+                if (
+                    entry?.node
+                ) {
+
+                    baselineNodeMap.set(
+                        entry.node,
+                        String(
+                            entry.text || ""
                         )
-                );
+                    );
+                }
+
+
+                const messageIds =
+                    String(
+                        entry?.messageIds || ""
+                    ).trim();
+
+
+                if (
+                    messageIds
+                ) {
+
+                    baselineMessageIds.add(
+                        messageIds
+                    );
+                }
+            }
 
 
             const candidateReplies = [];
@@ -1611,34 +1665,78 @@ async function getReliableVisionReply(
                 }
 
 
-                // Primary guard: an assistant node that existed before the
-                // current Vision prompt cannot be the answer to this prompt.
-                if (
-                    baselineNodes.has(
+                const messageIds =
+                    String(
+                        node.getAttribute(
+                            "data-chatgpt-search-message-ids"
+                        )
+                        ||
+                        node.getAttribute(
+                            "data-content-search-unit-key"
+                        )
+                        ||
+                        node.getAttribute(
+                            "data-chatgpt-search-unit-key"
+                        )
+                        ||
+                        ""
+                    ).trim();
+
+
+                const existedBefore =
+                    baselineNodeMap.has(
                         node
-                    )
-                ) {
-
-                    continue;
-                }
+                    );
 
 
-                // React can occasionally replace old DOM nodes during a
-                // rerender. In that case the object reference is new, so also
-                // reject exact texts that were already present at baseline.
+                const previousText =
+                    existedBefore
+                        ? baselineNodeMap.get(
+                            node
+                        )
+                        : "";
+
+
+                const sameMessageIdentity =
+                    Boolean(
+                        messageIds
+                        &&
+                        baselineMessageIds.has(
+                            messageIds
+                        )
+                    );
+
+
+                // A genuinely new assistant message is authoritative even if
+                // its JSON text is identical to an older answer. This is
+                // essential when retrying the same photo.
                 if (
-                    baselineTexts.has(
-                        text
-                    )
+                    !existedBefore
+                    &&
+                    !sameMessageIdentity
                 ) {
+
+                    candidateReplies.push(
+                        text
+                    );
 
                     continue;
                 }
 
 
-                candidateReplies.push(
-                    text
-                );
+                // ChatGPT can create an assistant container before the answer
+                // starts streaming, then fill that same DOM node in-place.
+                // Accept it only when the text actually changed after send.
+                if (
+                    existedBefore
+                    &&
+                    text !== previousText
+                ) {
+
+                    candidateReplies.push(
+                        text
+                    );
+                }
             }
 
 
@@ -1672,14 +1770,13 @@ async function getReliableVisionReply(
                 if (validJson) {
 
                     console.log(
-                        "VALID FINAL VISION JSON FOUND IN NEW DOM NODE:",
+                        "VALID FINAL VISION JSON FOUND IN CURRENT VISION TURN:",
                         validJson
                     );
 
                     return validJson;
                 }
             }
-
         } catch (domError) {
 
             console.warn(
