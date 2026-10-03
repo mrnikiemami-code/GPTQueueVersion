@@ -508,6 +508,14 @@ def _db_update_queue_job(job_id, **changes):
         )
 
 
+def _db_delete_queue_job(job_id):
+    with _db_connect() as db:
+        db.execute(
+            "DELETE FROM queue_jobs WHERE job_id = ?",
+            (job_id,),
+        )
+
+
 def _db_finalize_batch_waiting_destination(batch_id, prompt_message_id=None):
     with _db_connect() as db:
         db.execute(
@@ -622,8 +630,7 @@ def _db_mark_batch_done_if_complete(batch_id):
                   'sheet_submitted',
                   'sheet_failed',
                   'sheet_unconfirmed',
-                  'vision_failed',
-                  'retry_dismissed'
+                  'vision_failed'
               )
             """,
             (batch_id,),
@@ -1813,6 +1820,13 @@ def _retry_job_label(job, number):
 
     identity = " - ".join(identity_parts)
 
+    job_id = str(
+        job.get("jobId") or ""
+    ).strip()
+
+    if job_id:
+        identity = f"{identity} - Job {job_id}"
+
     return f"{number}) {identity}"
 
 
@@ -1835,7 +1849,7 @@ def _build_retry_keyboard(jobs):
                     callback_data=f"retryjob:{job_id}"
                 ),
                 InlineKeyboardButton(
-                    text=f"🗑 حذف {index}",
+                    text=f"🗑 حذف کامل {index}",
                     callback_data=f"retrydelete:{job_id}"
                 )
             ]
@@ -2695,16 +2709,31 @@ async def retry_delete_callback(
     except Exception:
         pass
 
+    current_status = str(
+        job.get("status") or ""
+    ).strip()
+
+    if current_status == "vision_failed":
+        warning_text = (
+            "⚠️ این Vision failed به‌طور کامل حذف شود؟\n"
+            "عکس ذخیره‌شده + فایل Job + رکورد Queue پاک می‌شوند.\n"
+            "بعد از حذف، Retry یا بازیابی از داخل ربات ممکن نیست."
+        )
+    else:
+        warning_text = (
+            "⚠️ این پردازش به‌طور کامل حذف شود؟\n"
+            "عکس ذخیره‌شده + فایل Job + رکورد Queue پاک می‌شوند.\n"
+            "ممکن است JSON استخراج‌شده هم از بین برود."
+        )
+
     await _safe_callback_message(
         query,
-        "⚠️ این مورد از لیست Retry حذف شود؟\n"
-        "عکس و فایل Job فعلاً پاک نمی‌شوند و فقط از لیست Retry کنار گذاشته می‌شود.\n\n"
-        f"Job ID: {job_id}",
+        warning_text + "\n\n" + f"Job ID: {job_id}",
         reply_markup=InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton(
-                        text="✅ حذف از Retry",
+                        text="✅ حذف کامل",
                         callback_data=f"retrydeleteconfirm:{job_id}"
                     ),
                     InlineKeyboardButton(
@@ -2793,39 +2822,87 @@ async def retry_delete_confirm_callback(
         )
         return
 
-    update_persisted_job(
-        job_path,
-        status="retry_dismissed",
-        lastError=job.get("lastError"),
-    )
+    image_path = str(
+        job.get("imagePath") or ""
+    ).strip()
 
     batch_id = str(
         job.get("batchId") or ""
     ).strip()
 
+    # Delete queue metadata first so the worker can no longer claim it.
+    try:
+        _db_delete_queue_job(
+            job_id
+        )
+    except Exception:
+        print("")
+        print("DELETE RETRY DB ROW FAILED:")
+        traceback.print_exc()
+        print("")
+
+        await query.answer(
+            "حذف کامل انجام نشد؛ دوباره تلاش کن.",
+            show_alert=True
+        )
+        return
+
+    deleted_files = []
+    delete_errors = []
+
+    for path in (
+        image_path,
+        job_path,
+    ):
+        if not path:
+            continue
+
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                deleted_files.append(path)
+        except Exception as ex:
+            delete_errors.append(
+                f"{path}: {ex}"
+            )
+
     if batch_id:
-        _db_mark_batch_done_if_complete(
-            batch_id
+        try:
+            _db_mark_batch_done_if_complete(
+                batch_id
+            )
+        except Exception:
+            traceback.print_exc()
+
+    if delete_errors:
+        message = (
+            "⚠️ رکورد Queue حذف شد، اما پاک‌کردن یک یا چند فایل کامل نشد.\n"
+            "این Job دیگر در /retry نمایش داده نمی‌شود.\n\n"
+            f"Job ID: {job_id}\n"
+            + "\n".join(delete_errors)
+        )
+    else:
+        message = (
+            "🗑 پردازش به‌طور کامل حذف شد.\n"
+            "عکس، فایل Job و رکورد Queue پاک شدند.\n\n"
+            f"Job ID: {job_id}"
         )
 
     try:
         await query.answer(
-            "از Retry حذف شد."
+            "حذف کامل انجام شد."
         )
     except Exception:
         pass
 
     try:
         await query.edit_message_text(
-            "🗑 این پردازش از لیست Retry حذف شد.\n"
-            "عکس و Job روی دیسک محفوظ مانده‌اند.\n\n"
-            f"Job ID: {job_id}"
+            message
         )
     except Exception:
         await _safe_callback_message(
             query,
-            "🗑 این پردازش از لیست Retry حذف شد.\n"
-            f"Job ID: {job_id}"
+            message
         )
 
 
