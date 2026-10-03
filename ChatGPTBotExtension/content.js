@@ -1648,10 +1648,6 @@ async function getReliableVisionReply(
     );
 
 
-    // -----------------------------------------------------
-    // 1) اول خود rawReply را کامل بررسی کن
-    // -----------------------------------------------------
-
     let validJson =
         parseValidVisionJsonFromReply(
             rawReply
@@ -1674,248 +1670,331 @@ async function getReliableVisionReply(
     );
 
 
-    // -----------------------------------------------------
-    // 2) تا 50 ثانیه DOM + getLastResponse
-    // -----------------------------------------------------
+    // =====================================================
+    // ROBUST CURRENT-TURN CORRELATION
+    //
+    // We no longer depend on DOM node order, React node identity, or
+    // previous reply text. The live ChatGPT UI exposes a stable UUID on
+    // assistant turns through:
+    //   data-chatgpt-search-message-ids
+    // and, inside the turn:
+    //   data-chatgpt-selection-message-id
+    //
+    // Snapshot every UUID that existed before sending the Vision prompt.
+    // After send, only assistant turns containing a previously unseen UUID
+    // are eligible as the answer to this command.
+    // =====================================================
 
-    const attempts = 25;
-    const delayMs = 2000;
-
-
-    for (
-        let attempt = 1;
-        attempt <= attempts;
-        attempt++
-    ) {
-
-        await sleep(
-            delayMs
-        );
-
-
-        // =================================================
-        // DOM
-        // =================================================
-
-        try {
-
-            const baselineTurnIds =
-                new Set(
-                    Array.isArray(
-                        assistantBaseline?.turnIds
-                    )
-                        ? assistantBaseline.turnIds
-                        : []
-                );
+    const baselineIds =
+        new Set();
 
 
-            const currentTurnRecords =
-                getAssistantTurnRecords();
+    const addIds = (
+        value
+    ) => {
 
-
-            const currentTurnCandidates = [];
-
-
-            for (
-                const record
-                of currentTurnRecords
-            ) {
-
-                if (
-                    !record?.messageId
-                    ||
-                    !record?.text
-                ) {
-
-                    continue;
-                }
-
-
-                if (
-                    baselineTurnIds.has(
-                        record.messageId
-                    )
-                ) {
-
-                    continue;
-                }
-
-
-                currentTurnCandidates.push(
-                    record
-                );
-            }
-
-
-            // Primary path: exact ChatGPT assistant message id correlation.
-            // This matches the live DOM shape:
-            // data-chatgpt-search-message-ids="<uuid> <uuid>".
-            for (
-                let i =
-                    currentTurnCandidates.length - 1;
-                i >= 0;
-                i--
-            ) {
-
-                const record =
-                    currentTurnCandidates[i];
-
-
-                console.log(
-                    `Vision current-turn candidate ${attempt}/${attempts}:`,
-                    record.messageId,
-                    record.text
-                );
-
-
-                validJson =
-                    parseValidVisionJson(
-                        record.text
-                    );
-
-
-                if (validJson) {
-
-                    console.log(
-                        "VALID FINAL VISION JSON FOUND BY MESSAGE ID:",
-                        record.messageId,
-                        validJson
-                    );
-
-                    return validJson;
-                }
-            }
-
-
-            // Secondary fallback for a UI variant that does not expose
-            // data-chatgpt-search-message-ids.
-            const currentNodes =
-                getAssistantMessageNodes();
-
-
-            const baselineEntries =
-                Array.isArray(
-                    assistantBaseline?.entries
-                )
-                    ? assistantBaseline.entries
-                    : [];
-
-
-            const baselineNodeMap =
-                new Map();
-
-
-            for (
-                const entry
-                of baselineEntries
-            ) {
-
-                if (
-                    entry?.node
-                ) {
-
-                    baselineNodeMap.set(
-                        entry.node,
-                        String(
-                            entry.text || ""
-                        )
-                    );
-                }
-            }
-
-
-            const candidateReplies = [];
-
-
-            for (
-                const node
-                of currentNodes
-            ) {
-
-                const text =
-                    getAssistantNodeText(
-                        node
-                    );
-
-
-                if (
-                    !text
-                ) {
-
-                    continue;
-                }
-
-
-                const existedBefore =
-                    baselineNodeMap.has(
-                        node
-                    );
-
-
-                const previousText =
-                    existedBefore
-                        ? baselineNodeMap.get(
-                            node
-                        )
-                        : "";
-
-
-                if (
-                    !existedBefore
-                    ||
-                    text !== previousText
-                ) {
-
-                    candidateReplies.push(
-                        text
-                    );
-                }
-            }
-
-
-            const domReply =
-                currentTurnCandidates.length > 0
-                    ? currentTurnCandidates[
-                        currentTurnCandidates.length - 1
-                    ].text
-                    : (
-                        candidateReplies.length > 0
-                            ? candidateReplies[
-                                candidateReplies.length - 1
-                            ]
-                            : ""
-                    );
-
-
-            console.log(
-                `Vision DOM check ${attempt}/${attempts}:`,
-                domReply || "(no new assistant reply yet)"
+        const text =
+            String(
+                value || ""
             );
 
 
+        const matches =
+            text.match(
+                /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi
+            )
+            || [];
+
+
+        for (
+            const id
+            of matches
+        ) {
+
+            baselineIds.add(
+                id.toLowerCase()
+            );
+        }
+    };
+
+
+    if (
+        Array.isArray(
+            assistantBaseline?.turnRecords
+        )
+    ) {
+
+        for (
+            const record
+            of assistantBaseline.turnRecords
+        ) {
+
+            addIds(
+                record?.messageId
+            );
+        }
+    }
+
+
+    if (
+        Array.isArray(
+            assistantBaseline?.nodes
+        )
+    ) {
+
+        for (
+            const node
+            of assistantBaseline.nodes
+        ) {
+
+            if (!node) {
+                continue;
+            }
+
+
+            addIds(
+                node.getAttribute?.(
+                    "data-chatgpt-search-message-ids"
+                )
+            );
+
+
+            const selectionNode =
+                node.querySelector?.(
+                    "[data-chatgpt-selection-message-id]"
+                );
+
+
+            addIds(
+                selectionNode?.getAttribute?.(
+                    "data-chatgpt-selection-message-id"
+                )
+            );
+        }
+    }
+
+
+    console.log(
+        "VISION baseline assistant message IDs:",
+        Array.from(
+            baselineIds
+        )
+    );
+
+
+    const timeoutMs = 90000;
+    const pollMs = 500;
+    const startedAt =
+        Date.now();
+
+    let pollNumber = 0;
+
+
+    while (
+        Date.now() - startedAt < timeoutMs
+    ) {
+
+        pollNumber++;
+
+
+        try {
+
+            const turnNodes =
+                Array.from(
+                    document.querySelectorAll(
+                        '[data-chatgpt-search-message-ids]'
+                    )
+                );
+
+
+            const candidates = [];
+
+
             for (
-                let i =
-                    candidateReplies.length - 1;
-                i >= 0;
-                i--
+                const turnNode
+                of turnNodes
             ) {
 
-                validJson =
-                    parseValidVisionJson(
-                        candidateReplies[i]
-                    );
+                if (
+                    !turnNode
+                    ||
+                    turnNode.closest(
+                        'form[data-chatgpt-composer]'
+                    )
+                ) {
 
-
-                if (validJson) {
-
-                    console.log(
-                        "VALID FINAL VISION JSON FOUND IN DOM FALLBACK:",
-                        validJson
-                    );
-
-                    return validJson;
+                    continue;
                 }
+
+
+                const roleNode =
+                    turnNode.querySelector(
+                        '[data-conversation-role="assistant"]'
+                    );
+
+
+                const markdownNode =
+                    turnNode.querySelector(
+                        '[data-markdown-text-style="assistant-message"]'
+                    );
+
+
+                if (
+                    !roleNode
+                    &&
+                    !markdownNode
+                ) {
+
+                    continue;
+                }
+
+
+                const idSources = [
+
+                    turnNode.getAttribute(
+                        "data-chatgpt-search-message-ids"
+                    ),
+
+                    turnNode
+                        .querySelector(
+                            "[data-chatgpt-selection-message-id]"
+                        )
+                        ?.getAttribute(
+                            "data-chatgpt-selection-message-id"
+                        )
+                ];
+
+
+                const ids = [];
+
+
+                for (
+                    const source
+                    of idSources
+                ) {
+
+                    const matches =
+                        String(
+                            source || ""
+                        ).match(
+                            /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi
+                        )
+                        || [];
+
+
+                    for (
+                        const id
+                        of matches
+                    ) {
+
+                        const normalizedId =
+                            id.toLowerCase();
+
+
+                        if (
+                            !ids.includes(
+                                normalizedId
+                            )
+                        ) {
+
+                            ids.push(
+                                normalizedId
+                            );
+                        }
+                    }
+                }
+
+
+                const hasNewId =
+                    ids.some(
+                        id =>
+                            !baselineIds.has(
+                                id
+                            )
+                    );
+
+
+                if (!hasNewId) {
+                    continue;
+                }
+
+
+                const text =
+                    getAssistantNodeText(
+                        markdownNode || turnNode
+                    );
+
+
+                if (!text) {
+                    continue;
+                }
+
+
+                candidates.push({
+
+                    ids,
+
+                    text
+                });
             }
+
+
+            if (
+                candidates.length > 0
+            ) {
+
+                const latest =
+                    candidates[
+                        candidates.length - 1
+                    ];
+
+
+                console.log(
+                    `Vision current-turn candidate ${pollNumber}:`,
+                    latest.ids,
+                    latest.text
+                );
+
+
+                // Check newest candidate first. During streaming the JSON may
+                // be temporarily incomplete; keep polling until it becomes
+                // valid instead of treating an incomplete fragment as failure.
+                for (
+                    let i =
+                        candidates.length - 1;
+                    i >= 0;
+                    i--
+                ) {
+
+                    validJson =
+                        parseValidVisionJson(
+                            candidates[i].text
+                        );
+
+
+                    if (validJson) {
+
+                        console.log(
+                            "VALID FINAL VISION JSON FOUND BY NEW MESSAGE ID:",
+                            candidates[i].ids,
+                            validJson
+                        );
+
+                        return validJson;
+                    }
+                }
+
+            } else if (
+                pollNumber === 1
+                ||
+                pollNumber % 10 === 0
+            ) {
+
+                console.log(
+                    `Vision DOM check ${pollNumber}: (no new assistant message id yet)`
+                );
+            }
+
         } catch (domError) {
 
             console.warn(
@@ -1925,58 +2004,47 @@ async function getReliableVisionReply(
         }
 
 
-        // =================================================
-        // getLastResponse fallback
-        // =================================================
-
+        // Keep getLastResponse only as a secondary fallback. It is never
+        // trusted over a newly correlated DOM turn.
         try {
 
             const lastReply =
                 await chatgpt.getLastResponse();
 
 
-            console.log(
-                `Vision getLastResponse ${attempt}/${attempts}:`,
-                lastReply
-            );
-
-
             validJson =
-                parseValidVisionJsonFromReply(
+                parseValidVisionJson(
                     lastReply
                 );
 
 
-            if (validJson) {
+            if (
+                validJson
+                &&
+                baselineIds.size === 0
+            ) {
 
                 console.log(
-                    "VALID FINAL VISION JSON FOUND BY getLastResponse:",
+                    "VALID FINAL VISION JSON FOUND BY getLastResponse FALLBACK:",
                     validJson
                 );
 
                 return validJson;
             }
 
-        } catch (fallbackError) {
-
-            console.warn(
-                "Vision getLastResponse failed:",
-                fallbackError
-            );
-        }
+        } catch (_) {}
 
 
-        console.log(
-            "Still waiting for valid Vision JSON..."
+        await sleep(
+            pollMs
         );
     }
 
 
     throw new Error(
-        "AI response was visible, but no parseable Vision JSON was found within 50 seconds."
+        "Vision answer appeared without a correlatable new assistant message ID, or no valid JSON was produced within 90 seconds."
     );
 }
-
 
 // =========================================================
 // COMMAND PROCESSOR
