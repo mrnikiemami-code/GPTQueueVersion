@@ -622,7 +622,8 @@ def _db_mark_batch_done_if_complete(batch_id):
                   'sheet_submitted',
                   'sheet_failed',
                   'sheet_unconfirmed',
-                  'vision_failed'
+                  'vision_failed',
+                  'retry_dismissed'
               )
             """,
             (batch_id,),
@@ -1832,6 +1833,10 @@ def _build_retry_keyboard(jobs):
                 InlineKeyboardButton(
                     text=f"🔄 Retry {index}",
                     callback_data=f"retryjob:{job_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"🗑 حذف {index}",
+                    callback_data=f"retrydelete:{job_id}"
                 )
             ]
         )
@@ -1999,6 +2004,26 @@ async def retry_job_by_id(update, job_id):
         message = (
             "ℹ️ این درخواست قبلاً به Google Apps Script تحویل شده است.\n"
             "برای جلوگیری از ثبت تکراری، POST مجدد انجام نمی‌شود.\n\n"
+            f"Job ID: {job_id}"
+        )
+
+        if update.callback_query:
+            await _safe_callback_message(
+                update.callback_query,
+                message
+            )
+        else:
+            await safe_reply(
+                update,
+                message
+            )
+
+        return
+
+    if current_status == "retry_dismissed":
+
+        message = (
+            "ℹ️ این پردازش قبلاً از لیست Retry حذف شده است.\n\n"
             f"Job ID: {job_id}"
         )
 
@@ -2575,6 +2600,262 @@ async def retry_callback(
 
 # =========================================================
 # END CALLBACK: Retry buttons
+# =========================================================
+
+
+# =========================================================
+# START CALLBACK: Delete Retry buttons
+# =========================================================
+
+async def retry_delete_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    if query is None:
+        return
+
+    if not is_allowed_user(update):
+        try:
+            await query.answer(
+                "دسترسی ندارید.",
+                show_alert=True
+            )
+        except Exception:
+            pass
+        return
+
+    callback_data = str(
+        query.data or ""
+    )
+
+    prefix = "retrydelete:"
+
+    if not callback_data.startswith(
+        prefix
+    ):
+        return
+
+    job_id = callback_data[
+        len(prefix):
+    ].strip()
+
+    if not job_id:
+        await query.answer(
+            "شناسه پردازش نامعتبر است.",
+            show_alert=True
+        )
+        return
+
+    user_id = get_telegram_user_id(
+        update
+    )
+
+    job_path = os.path.join(
+        JOBS_DIR,
+        f"{job_id}.json"
+    )
+
+    if not os.path.exists(job_path):
+        await query.answer(
+            "این پردازش پیدا نشد.",
+            show_alert=True
+        )
+        return
+
+    try:
+        job = _load_job_file(
+            job_path
+        )
+    except Exception:
+        await query.answer(
+            "فایل پردازش قابل خواندن نیست.",
+            show_alert=True
+        )
+        return
+
+    if int(job.get("telegramUserId") or 0) != int(user_id or 0):
+        await query.answer(
+            "این پردازش متعلق به کاربر دیگری است.",
+            show_alert=True
+        )
+        return
+
+    if job.get("status") not in RETRYABLE_JOB_STATUSES:
+        await query.answer(
+            "این مورد دیگر در لیست Retry نیست.",
+            show_alert=True
+        )
+        return
+
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    await _safe_callback_message(
+        query,
+        "⚠️ این مورد از لیست Retry حذف شود؟\n"
+        "عکس و فایل Job فعلاً پاک نمی‌شوند و فقط از لیست Retry کنار گذاشته می‌شود.\n\n"
+        f"Job ID: {job_id}",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        text="✅ حذف از Retry",
+                        callback_data=f"retrydeleteconfirm:{job_id}"
+                    ),
+                    InlineKeyboardButton(
+                        text="↩️ انصراف",
+                        callback_data=f"retrydeletecancel:{job_id}"
+                    )
+                ]
+            ]
+        )
+    )
+
+
+async def retry_delete_confirm_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    if query is None:
+        return
+
+    if not is_allowed_user(update):
+        try:
+            await query.answer(
+                "دسترسی ندارید.",
+                show_alert=True
+            )
+        except Exception:
+            pass
+        return
+
+    callback_data = str(
+        query.data or ""
+    )
+
+    prefix = "retrydeleteconfirm:"
+
+    if not callback_data.startswith(
+        prefix
+    ):
+        return
+
+    job_id = callback_data[
+        len(prefix):
+    ].strip()
+
+    job_path = os.path.join(
+        JOBS_DIR,
+        f"{job_id}.json"
+    )
+
+    if not os.path.exists(job_path):
+        await query.answer(
+            "این پردازش پیدا نشد.",
+            show_alert=True
+        )
+        return
+
+    try:
+        job = _load_job_file(
+            job_path
+        )
+    except Exception:
+        await query.answer(
+            "فایل پردازش قابل خواندن نیست.",
+            show_alert=True
+        )
+        return
+
+    user_id = get_telegram_user_id(
+        update
+    )
+
+    if int(job.get("telegramUserId") or 0) != int(user_id or 0):
+        await query.answer(
+            "این پردازش متعلق به کاربر دیگری است.",
+            show_alert=True
+        )
+        return
+
+    if job.get("status") not in RETRYABLE_JOB_STATUSES:
+        await query.answer(
+            "این مورد دیگر در لیست Retry نیست.",
+            show_alert=True
+        )
+        return
+
+    update_persisted_job(
+        job_path,
+        status="retry_dismissed",
+        lastError=job.get("lastError"),
+    )
+
+    batch_id = str(
+        job.get("batchId") or ""
+    ).strip()
+
+    if batch_id:
+        _db_mark_batch_done_if_complete(
+            batch_id
+        )
+
+    try:
+        await query.answer(
+            "از Retry حذف شد."
+        )
+    except Exception:
+        pass
+
+    try:
+        await query.edit_message_text(
+            "🗑 این پردازش از لیست Retry حذف شد.\n"
+            "عکس و Job روی دیسک محفوظ مانده‌اند.\n\n"
+            f"Job ID: {job_id}"
+        )
+    except Exception:
+        await _safe_callback_message(
+            query,
+            "🗑 این پردازش از لیست Retry حذف شد.\n"
+            f"Job ID: {job_id}"
+        )
+
+
+async def retry_delete_cancel_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    if query is None:
+        return
+
+    try:
+        await query.answer(
+            "لغو شد."
+        )
+    except Exception:
+        pass
+
+    try:
+        await query.edit_message_text(
+            "↩️ حذف Retry لغو شد."
+        )
+    except Exception:
+        pass
+
+
+# =========================================================
+# END CALLBACK: Delete Retry buttons
 # =========================================================
 
 
@@ -3689,6 +3970,30 @@ def main():
         CallbackQueryHandler(
             retry_callback,
             pattern=r"^retryjob:"
+        )
+    )
+
+
+    app.add_handler(
+        CallbackQueryHandler(
+            retry_delete_callback,
+            pattern=r"^retrydelete:"
+        )
+    )
+
+
+    app.add_handler(
+        CallbackQueryHandler(
+            retry_delete_confirm_callback,
+            pattern=r"^retrydeleteconfirm:"
+        )
+    )
+
+
+    app.add_handler(
+        CallbackQueryHandler(
+            retry_delete_cancel_callback,
+            pattern=r"^retrydeletecancel:"
         )
     )
 
