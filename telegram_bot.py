@@ -13,6 +13,7 @@ import uuid
 import time
 import re
 import sqlite3
+import hashlib
 from datetime import datetime, timezone, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -1731,7 +1732,37 @@ def _retry_identity_values(job):
     return instagram_id, phone
 
 
-def get_retryable_jobs_for_user(user_id):
+def _retry_image_identity(job):
+    image_path = str(
+        job.get("imagePath") or ""
+    ).strip()
+
+    if image_path and os.path.exists(image_path):
+        try:
+            digest = hashlib.sha256()
+
+            with open(image_path, "rb") as image_file:
+                for chunk in iter(
+                    lambda: image_file.read(1024 * 1024),
+                    b""
+                ):
+                    digest.update(chunk)
+
+            return "sha256:" + digest.hexdigest()
+        except Exception:
+            pass
+
+    telegram_file_id = str(
+        job.get("telegramFileId") or ""
+    ).strip()
+
+    if telegram_file_id:
+        return "telegram:" + telegram_file_id
+
+    return ""
+
+
+def get_retryable_jobs_for_allowed_users():
     jobs = []
 
     if not os.path.isdir(JOBS_DIR):
@@ -1753,7 +1784,11 @@ def get_retryable_jobs_for_user(user_id):
             print("")
             continue
 
-        if int(job.get("telegramUserId") or 0) != int(user_id or 0):
+        telegram_user_id = int(
+            job.get("telegramUserId") or 0
+        )
+
+        if telegram_user_id not in ALLOWED_USER_IDS:
             continue
 
         if job.get("status") not in RETRYABLE_JOB_STATUSES:
@@ -1762,27 +1797,25 @@ def get_retryable_jobs_for_user(user_id):
         job["_jobPath"] = job_path
         jobs.append(job)
 
-    # جدیدترین Job اول قرار می‌گیرد.
+    # Newest first.
     jobs.sort(
         key=_job_sort_key,
         reverse=True
     )
 
     # =========================================================
-    # DEDUPE RETRY LIST BY LEAD
+    # DEDUPE RETRY LIST
     #
-    # اگر یک لید چند بار عکسش ارسال شده باشد، چند Job مختلف
-    # ساخته می‌شود. در /retry فقط جدیدترین Job همان لید نمایش
-    # داده می‌شود.
-    #
-    # تطبیق با Instagram ID یا Phone انجام می‌شود.
-    # Jobهای قدیمی حذف نمی‌شوند؛ فقط از لیست Retry مخفی می‌شوند.
+    # 1) After Vision we can dedupe by Instagram / phone.
+    # 2) Before Vision succeeds there is no name/phone yet, so use the
+    #    persisted image SHA-256. This also works when Telegram gives the
+    #    same picture a different message id or file id.
     # =========================================================
 
     deduped_jobs = []
     seen_instagrams = set()
     seen_phones = set()
-    seen_telegram_file_ids = set()
+    seen_images = set()
 
     for job in jobs:
 
@@ -1790,9 +1823,9 @@ def get_retryable_jobs_for_user(user_id):
             job
         )
 
-        telegram_file_id = str(
-            job.get("telegramFileId") or ""
-        ).strip()
+        image_identity = _retry_image_identity(
+            job
+        )
 
         duplicate_lead = False
 
@@ -1808,13 +1841,9 @@ def get_retryable_jobs_for_user(user_id):
         ):
             duplicate_lead = True
 
-        # Vision-failed jobs have no extracted identity yet. In that state,
-        # Telegram's file_id is the best stable identity we already persist
-        # for detecting the exact same photo across repeated submissions.
         if (
-            job.get("status") == "vision_failed"
-            and telegram_file_id
-            and telegram_file_id in seen_telegram_file_ids
+            image_identity
+            and image_identity in seen_images
         ):
             duplicate_lead = True
 
@@ -1835,15 +1864,110 @@ def get_retryable_jobs_for_user(user_id):
                 phone
             )
 
-        if (
-            job.get("status") == "vision_failed"
-            and telegram_file_id
-        ):
-            seen_telegram_file_ids.add(
-                telegram_file_id
+        if image_identity:
+            seen_images.add(
+                image_identity
             )
 
     return deduped_jobs
+
+
+def _get_retry_group_jobs(selected_job):
+    """
+    Return all retryable jobs representing the same item.
+
+    Exact image identity is preferred because Vision-failed jobs do not yet
+    have a reliable extracted lead identity. If no image identity exists,
+    fall back to normalized Instagram/phone.
+    """
+    selected_image = _retry_image_identity(
+        selected_job
+    )
+
+    selected_instagram, selected_phone = _retry_identity_values(
+        selected_job
+    )
+
+    matches = []
+
+    if not os.path.isdir(JOBS_DIR):
+        return matches
+
+    for name in os.listdir(JOBS_DIR):
+
+        if not name.lower().endswith(".json"):
+            continue
+
+        job_path = os.path.join(
+            JOBS_DIR,
+            name
+        )
+
+        try:
+            job = _load_job_file(
+                job_path
+            )
+        except Exception:
+            continue
+
+        telegram_user_id = int(
+            job.get("telegramUserId") or 0
+        )
+
+        if telegram_user_id not in ALLOWED_USER_IDS:
+            continue
+
+        if job.get("status") not in RETRYABLE_JOB_STATUSES:
+            continue
+
+        same_item = False
+
+        candidate_image = _retry_image_identity(
+            job
+        )
+
+        if (
+            selected_image
+            and candidate_image
+            and selected_image == candidate_image
+        ):
+            same_item = True
+
+        if not same_item:
+            candidate_instagram, candidate_phone = _retry_identity_values(
+                job
+            )
+
+            if (
+                selected_instagram
+                and candidate_instagram == selected_instagram
+            ):
+                same_item = True
+
+            if (
+                selected_phone
+                and candidate_phone == selected_phone
+            ):
+                same_item = True
+
+        if same_item:
+            job["_jobPath"] = job_path
+            matches.append(job)
+
+    # If no identity was available, the selected job itself is still valid.
+    if not matches:
+        selected_copy = dict(
+            selected_job
+        )
+        selected_copy["_jobPath"] = os.path.join(
+            JOBS_DIR,
+            f"{selected_job.get('jobId')}.json"
+        )
+        matches.append(
+            selected_copy
+        )
+
+    return matches
 
 
 def _retry_job_label(job, number):
@@ -1865,65 +1989,73 @@ def _retry_job_label(job, number):
         job.get("status") or ""
     ).strip()
 
-    identity_parts = []
+    telegram_user_id = str(
+        job.get("telegramUserId") or ""
+    ).strip()
 
-    if full_name:
-        identity_parts.append(full_name)
+    message_id = str(
+        job.get("telegramMessageId") or ""
+    ).strip()
 
-    if phone:
-        identity_parts.append(phone)
+    destination = str(
+        job.get("destination") or ""
+    ).strip()
 
-    if not identity_parts and instagram_id:
-        identity_parts.append(instagram_id)
+    destination_label = DESTINATION_LABELS.get(
+        destination,
+        destination or "-"
+    )
 
-    if not identity_parts and status == "vision_failed":
+    created_at = str(
+        job.get("createdAt") or ""
+    ).strip()
 
-        message_id = str(
-            job.get("telegramMessageId") or ""
-        ).strip()
-
-        destination = str(
-            job.get("destination") or ""
-        ).strip()
-
-        created_at = str(
-            job.get("createdAt") or ""
-        ).strip()
-
-        jalali_datetime = _format_jalali_datetime(
-            created_at
-        )
-
-        identity_parts.append("Vision failed")
-
-        if message_id:
-            identity_parts.append(
-                f"Msg {message_id}"
-            )
-
-        if jalali_datetime:
-            identity_parts.append(
-                jalali_datetime
-            )
-
-        if destination:
-            identity_parts.append(
-                destination
-            )
-
-    if not identity_parts:
-        identity_parts.append("بدون نام")
-
-    identity = " - ".join(identity_parts)
+    jalali_datetime = _format_jalali_datetime(
+        created_at
+    )
 
     job_id = str(
         job.get("jobId") or ""
     ).strip()
 
-    if job_id:
-        identity = f"{identity} - Job {job_id}"
+    identity = (
+        full_name
+        or phone
+        or instagram_id
+        or "Vision failed"
+    )
 
-    return f"{number}) {identity}"
+    lines = [
+        f"{number}) {identity}",
+    ]
+
+    if telegram_user_id:
+        lines.append(
+            f"   User: {telegram_user_id}"
+        )
+
+    if message_id:
+        lines.append(
+            f"   Msg: {message_id}"
+        )
+
+    if jalali_datetime:
+        lines.append(
+            f"   زمان: {jalali_datetime}"
+        )
+
+    lines.append(
+        f"   مقصد: {destination_label}"
+    )
+
+    if job_id:
+        lines.append(
+            f"   Job: {job_id}"
+        )
+
+    return "\n".join(
+        lines
+    )
 
 
 def _build_retry_keyboard(jobs):
@@ -2084,11 +2216,10 @@ async def retry_job_by_id(update, job_id):
 
         return
 
-    if int(job.get("telegramUserId") or 0) != int(user_id):
+    if int(job.get("telegramUserId") or 0) not in ALLOWED_USER_IDS:
 
         message = (
-            "⛔ این پردازش متعلق به کاربر دیگری است "
-            "و اجازه Retry آن را ندارید."
+            "⛔ مالک این پردازش در فهرست کاربران مجاز نیست."
         )
 
         if update.callback_query:
@@ -2545,19 +2676,13 @@ async def retry_command(
         await deny_access(update)
         return
 
-    user_id = get_telegram_user_id(
-        update
-    )
-
-    jobs = get_retryable_jobs_for_user(
-        user_id
-    )
+    jobs = get_retryable_jobs_for_allowed_users()
 
     if not jobs:
 
         await safe_reply(
             update,
-            "✅ هیچ پردازش ناموفق یا در انتظار Retry برای شما وجود ندارد."
+            "✅ هیچ پردازش ناموفق یا در انتظار Retry برای کاربران مجاز وجود ندارد."
         )
         return
 
@@ -2786,9 +2911,9 @@ async def retry_delete_callback(
         )
         return
 
-    if int(job.get("telegramUserId") or 0) != int(user_id or 0):
+    if int(job.get("telegramUserId") or 0) not in ALLOWED_USER_IDS:
         await query.answer(
-            "این پردازش متعلق به کاربر دیگری است.",
+            "مالک این پردازش در فهرست کاربران مجاز نیست.",
             show_alert=True
         )
         return
@@ -2813,6 +2938,7 @@ async def retry_delete_callback(
         warning_text = (
             "⚠️ این Vision failed به‌طور کامل حذف شود؟\n"
             "عکس ذخیره‌شده + فایل Job + رکورد Queue پاک می‌شوند.\n"
+            "اگر همین عکس چند Job تکراری داشته باشد، همه آن‌ها هم پاک می‌شوند.\n"
             "بعد از حذف، Retry یا بازیابی از داخل ربات ممکن نیست."
         )
     else:
@@ -2904,9 +3030,9 @@ async def retry_delete_confirm_callback(
         update
     )
 
-    if int(job.get("telegramUserId") or 0) != int(user_id or 0):
+    if int(job.get("telegramUserId") or 0) not in ALLOWED_USER_IDS:
         await query.answer(
-            "این پردازش متعلق به کاربر دیگری است.",
+            "مالک این پردازش در فهرست کاربران مجاز نیست.",
             show_alert=True
         )
         return
@@ -2918,70 +3044,89 @@ async def retry_delete_confirm_callback(
         )
         return
 
-    image_path = str(
-        job.get("imagePath") or ""
-    ).strip()
+    retry_group = _get_retry_group_jobs(
+        job
+    )
 
-    batch_id = str(
-        job.get("batchId") or ""
-    ).strip()
-
-    # Delete queue metadata first so the worker can no longer claim it.
-    try:
-        _db_delete_queue_job(
-            job_id
-        )
-    except Exception:
-        print("")
-        print("DELETE RETRY DB ROW FAILED:")
-        traceback.print_exc()
-        print("")
-
-        await query.answer(
-            "حذف کامل انجام نشد؛ دوباره تلاش کن.",
-            show_alert=True
-        )
-        return
-
-    deleted_files = []
+    deleted_job_ids = []
     delete_errors = []
+    touched_batch_ids = set()
 
-    for path in (
-        image_path,
-        job_path,
-    ):
-        if not path:
-            continue
+    for grouped_job in retry_group:
 
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-                deleted_files.append(path)
-        except Exception as ex:
-            delete_errors.append(
-                f"{path}: {ex}"
+        grouped_job_id = str(
+            grouped_job.get("jobId") or ""
+        ).strip()
+
+        grouped_job_path = str(
+            grouped_job.get("_jobPath")
+            or os.path.join(
+                JOBS_DIR,
+                f"{grouped_job_id}.json"
+            )
+        ).strip()
+
+        grouped_image_path = str(
+            grouped_job.get("imagePath") or ""
+        ).strip()
+
+        grouped_batch_id = str(
+            grouped_job.get("batchId") or ""
+        ).strip()
+
+        if grouped_batch_id:
+            touched_batch_ids.add(
+                grouped_batch_id
             )
 
-    if batch_id:
+        try:
+            _db_delete_queue_job(
+                grouped_job_id
+            )
+        except Exception as ex:
+            delete_errors.append(
+                f"DB {grouped_job_id}: {ex}"
+            )
+            continue
+
+        for path in (
+            grouped_image_path,
+            grouped_job_path,
+        ):
+            if not path:
+                continue
+
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as ex:
+                delete_errors.append(
+                    f"{path}: {ex}"
+                )
+
+        deleted_job_ids.append(
+            grouped_job_id
+        )
+
+    for grouped_batch_id in touched_batch_ids:
         try:
             _db_mark_batch_done_if_complete(
-                batch_id
+                grouped_batch_id
             )
         except Exception:
             traceback.print_exc()
 
     if delete_errors:
         message = (
-            "⚠️ رکورد Queue حذف شد، اما پاک‌کردن یک یا چند فایل کامل نشد.\n"
-            "این Job دیگر در /retry نمایش داده نمی‌شود.\n\n"
-            f"Job ID: {job_id}\n"
-            + "\n".join(delete_errors)
+            "⚠️ حذف انجام شد، اما بعضی فایل‌ها یا رکوردها کامل پاک نشدند.\n"
+            f"تعداد Job حذف‌شده: {len(deleted_job_ids)}\n\n"
+            + "\n".join(delete_errors[:5])
         )
     else:
         message = (
             "🗑 پردازش به‌طور کامل حذف شد.\n"
-            "عکس، فایل Job و رکورد Queue پاک شدند.\n\n"
-            f"Job ID: {job_id}"
+            "همه Jobهای Retry تکراری مربوط به همان عکس/لید نیز پاک شدند.\n"
+            f"تعداد Job حذف‌شده: {len(deleted_job_ids)}"
         )
 
     try:
