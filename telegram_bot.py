@@ -1869,6 +1869,52 @@ def get_retryable_jobs_for_allowed_users():
                 image_identity
             )
 
+    # Attach transparent duplicate metadata to every visible retry item.
+    # The UI stays compact (one representative per group), but the operator
+    # can still see exactly which Job IDs were hidden by deduplication.
+    for representative in deduped_jobs:
+
+        representative_job_id = str(
+            representative.get("jobId") or ""
+        ).strip()
+
+        hidden_job_ids = []
+
+        try:
+            group_jobs = _get_retry_group_jobs(
+                representative
+            )
+        except Exception:
+            group_jobs = []
+
+        for grouped_job in group_jobs:
+
+            grouped_job_id = str(
+                grouped_job.get("jobId") or ""
+            ).strip()
+
+            if (
+                grouped_job_id
+                and grouped_job_id != representative_job_id
+            ):
+                hidden_job_ids.append(
+                    grouped_job_id
+                )
+
+        # Newest visible representative remains first; hidden ids are shown
+        # newest-first as returned by the filesystem/group scan is not stable,
+        # so sort by their persisted job metadata where possible.
+        hidden_job_ids = list(
+            dict.fromkeys(
+                hidden_job_ids
+            )
+        )
+
+        representative["_hiddenDuplicateJobIds"] = hidden_job_ids
+        representative["_hiddenDuplicateCount"] = len(
+            hidden_job_ids
+        )
+
     return deduped_jobs
 
 
@@ -2052,6 +2098,38 @@ def _retry_job_label(job, number):
         lines.append(
             f"   Job: {job_id}"
         )
+
+    hidden_duplicate_ids = list(
+        job.get("_hiddenDuplicateJobIds") or []
+    )
+
+    hidden_duplicate_count = int(
+        job.get("_hiddenDuplicateCount") or 0
+    )
+
+    if hidden_duplicate_count > 0:
+        lines.append(
+            f"   ♻️ تکراری‌های مخفی: {hidden_duplicate_count}"
+        )
+
+        max_visible_hidden_ids = 8
+
+        for hidden_job_id in hidden_duplicate_ids[
+            :max_visible_hidden_ids
+        ]:
+            lines.append(
+                f"      └─ {hidden_job_id}"
+            )
+
+        remaining_hidden = (
+            hidden_duplicate_count
+            - max_visible_hidden_ids
+        )
+
+        if remaining_hidden > 0:
+            lines.append(
+                f"      └─ ... و {remaining_hidden} Job دیگر"
+            )
 
     return "\n".join(
         lines
