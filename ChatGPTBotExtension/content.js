@@ -1427,10 +1427,23 @@ function getAssistantSnapshot() {
         getAssistantMessageNodes();
 
 
-    const lastNode =
-        nodes.length > 0
-            ? nodes[nodes.length - 1]
-            : null;
+    const texts =
+        nodes
+            .map(
+                node =>
+                    getAssistantNodeText(
+                        node
+                    )
+            )
+            .filter(
+                Boolean
+            );
+
+
+    const lastText =
+        texts.length > 0
+            ? texts[texts.length - 1]
+            : "";
 
 
     return {
@@ -1438,10 +1451,14 @@ function getAssistantSnapshot() {
         count:
             nodes.length,
 
-        lastText:
-            getAssistantNodeText(
-                lastNode
-            )
+        lastText,
+
+        // Keep the actual DOM node references as well as their texts.
+        // Vision must only accept a genuinely new assistant answer after
+        // the prompt is sent; DOM order alone is not a safe correlation.
+        nodes,
+
+        texts
     };
 }
 
@@ -1544,43 +1561,118 @@ async function getReliableVisionReply(
 
         try {
 
-            const currentSnapshot =
-                getAssistantSnapshot();
+            const currentNodes =
+                getAssistantMessageNodes();
+
+
+            const baselineNodes =
+                new Set(
+                    Array.isArray(
+                        assistantBaseline?.nodes
+                    )
+                        ? assistantBaseline.nodes
+                        : []
+                );
+
+
+            const baselineTexts =
+                new Set(
+                    Array.isArray(
+                        assistantBaseline?.texts
+                    )
+                        ? assistantBaseline.texts
+                        : (
+                            assistantBaseline?.lastText
+                                ? [assistantBaseline.lastText]
+                                : []
+                        )
+                );
+
+
+            const candidateReplies = [];
+
+
+            for (
+                const node
+                of currentNodes
+            ) {
+
+                const text =
+                    getAssistantNodeText(
+                        node
+                    );
+
+
+                if (
+                    !text
+                ) {
+
+                    continue;
+                }
+
+
+                // Primary guard: an assistant node that existed before the
+                // current Vision prompt cannot be the answer to this prompt.
+                if (
+                    baselineNodes.has(
+                        node
+                    )
+                ) {
+
+                    continue;
+                }
+
+
+                // React can occasionally replace old DOM nodes during a
+                // rerender. In that case the object reference is new, so also
+                // reject exact texts that were already present at baseline.
+                if (
+                    baselineTexts.has(
+                        text
+                    )
+                ) {
+
+                    continue;
+                }
+
+
+                candidateReplies.push(
+                    text
+                );
+            }
 
 
             const domReply =
-                getLatestAssistantText();
+                candidateReplies.length > 0
+                    ? candidateReplies[
+                        candidateReplies.length - 1
+                    ]
+                    : "";
 
 
             console.log(
                 `Vision DOM check ${attempt}/${attempts}:`,
-                domReply
+                domReply || "(no new assistant reply yet)"
             );
 
 
-            const domChanged =
-                currentSnapshot.count >
-                    assistantBaseline.count
-                ||
-                currentSnapshot.lastText !==
-                    assistantBaseline.lastText;
-
-
-            if (
-                domChanged &&
-                domReply
+            for (
+                let i =
+                    candidateReplies.length - 1;
+                i >= 0;
+                i--
             ) {
 
                 validJson =
                     parseValidVisionJson(
-                        domReply
+                        candidateReplies[i]
                     );
 
 
                 if (validJson) {
 
                     console.log(
-                        "VALID FINAL VISION JSON FOUND IN DOM:",
+                        "VALID FINAL VISION JSON FOUND IN NEW DOM NODE:",
                         validJson
                     );
 
