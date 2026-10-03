@@ -1421,6 +1421,119 @@ function getAssistantMessageNodes() {
 }
 
 
+function getAssistantTurnRecords() {
+
+    const records = [];
+
+    const seenIds =
+        new Set();
+
+
+    // Current ChatGPT UI exposes a stable per-message id on the outer
+    // assistant turn. Prefer this over DOM position or node object identity.
+    const outerTurns =
+        Array.from(
+            document.querySelectorAll(
+                '[data-chatgpt-search-message-ids]'
+            )
+        );
+
+
+    for (
+        const node
+        of outerTurns
+    ) {
+
+        if (
+            !node
+            ||
+            node.closest(
+                'form[data-chatgpt-composer]'
+            )
+        ) {
+
+            continue;
+        }
+
+
+        const roleNode =
+            node.querySelector(
+                '[data-conversation-role="assistant"]'
+            );
+
+
+        const markdownNode =
+            node.querySelector(
+                '[data-markdown-text-style="assistant-message"]'
+            );
+
+
+        if (
+            !roleNode
+            &&
+            !markdownNode
+        ) {
+
+            continue;
+        }
+
+
+        const messageId =
+            String(
+                node.getAttribute(
+                    "data-chatgpt-search-message-ids"
+                )
+                ||
+                ""
+            ).trim();
+
+
+        const text =
+            getAssistantNodeText(
+                markdownNode || node
+            );
+
+
+        if (
+            !messageId
+            ||
+            !text
+        ) {
+
+            continue;
+        }
+
+
+        if (
+            seenIds.has(
+                messageId
+            )
+        ) {
+
+            continue;
+        }
+
+
+        seenIds.add(
+            messageId
+        );
+
+
+        records.push({
+
+            node,
+
+            messageId,
+
+            text
+        });
+    }
+
+
+    return records;
+}
+
+
 function getAssistantSnapshot() {
 
     const nodes =
@@ -1436,25 +1549,19 @@ function getAssistantSnapshot() {
                 text:
                     getAssistantNodeText(
                         node
-                    ),
-
-                messageIds:
-                    String(
-                        node.getAttribute(
-                            "data-chatgpt-search-message-ids"
-                        )
-                        ||
-                        node.getAttribute(
-                            "data-content-search-unit-key"
-                        )
-                        ||
-                        node.getAttribute(
-                            "data-chatgpt-search-unit-key"
-                        )
-                        ||
-                        ""
-                    ).trim()
+                    )
             })
+        );
+
+
+    const turnRecords =
+        getAssistantTurnRecords();
+
+
+    const turnIds =
+        turnRecords.map(
+            record =>
+                record.messageId
         );
 
 
@@ -1486,7 +1593,11 @@ function getAssistantSnapshot() {
 
         texts,
 
-        entries
+        entries,
+
+        turnRecords,
+
+        turnIds
     };
 }
 
@@ -1588,6 +1699,96 @@ async function getReliableVisionReply(
 
         try {
 
+            const baselineTurnIds =
+                new Set(
+                    Array.isArray(
+                        assistantBaseline?.turnIds
+                    )
+                        ? assistantBaseline.turnIds
+                        : []
+                );
+
+
+            const currentTurnRecords =
+                getAssistantTurnRecords();
+
+
+            const currentTurnCandidates = [];
+
+
+            for (
+                const record
+                of currentTurnRecords
+            ) {
+
+                if (
+                    !record?.messageId
+                    ||
+                    !record?.text
+                ) {
+
+                    continue;
+                }
+
+
+                if (
+                    baselineTurnIds.has(
+                        record.messageId
+                    )
+                ) {
+
+                    continue;
+                }
+
+
+                currentTurnCandidates.push(
+                    record
+                );
+            }
+
+
+            // Primary path: exact ChatGPT assistant message id correlation.
+            // This matches the live DOM shape:
+            // data-chatgpt-search-message-ids="<uuid> <uuid>".
+            for (
+                let i =
+                    currentTurnCandidates.length - 1;
+                i >= 0;
+                i--
+            ) {
+
+                const record =
+                    currentTurnCandidates[i];
+
+
+                console.log(
+                    `Vision current-turn candidate ${attempt}/${attempts}:`,
+                    record.messageId,
+                    record.text
+                );
+
+
+                validJson =
+                    parseValidVisionJson(
+                        record.text
+                    );
+
+
+                if (validJson) {
+
+                    console.log(
+                        "VALID FINAL VISION JSON FOUND BY MESSAGE ID:",
+                        record.messageId,
+                        validJson
+                    );
+
+                    return validJson;
+                }
+            }
+
+
+            // Secondary fallback for a UI variant that does not expose
+            // data-chatgpt-search-message-ids.
             const currentNodes =
                 getAssistantMessageNodes();
 
@@ -1604,10 +1805,6 @@ async function getReliableVisionReply(
                 new Map();
 
 
-            const baselineMessageIds =
-                new Set();
-
-
             for (
                 const entry
                 of baselineEntries
@@ -1622,22 +1819,6 @@ async function getReliableVisionReply(
                         String(
                             entry.text || ""
                         )
-                    );
-                }
-
-
-                const messageIds =
-                    String(
-                        entry?.messageIds || ""
-                    ).trim();
-
-
-                if (
-                    messageIds
-                ) {
-
-                    baselineMessageIds.add(
-                        messageIds
                     );
                 }
             }
@@ -1665,24 +1846,6 @@ async function getReliableVisionReply(
                 }
 
 
-                const messageIds =
-                    String(
-                        node.getAttribute(
-                            "data-chatgpt-search-message-ids"
-                        )
-                        ||
-                        node.getAttribute(
-                            "data-content-search-unit-key"
-                        )
-                        ||
-                        node.getAttribute(
-                            "data-chatgpt-search-unit-key"
-                        )
-                        ||
-                        ""
-                    ).trim();
-
-
                 const existedBefore =
                     baselineNodeMap.has(
                         node
@@ -1697,39 +1860,9 @@ async function getReliableVisionReply(
                         : "";
 
 
-                const sameMessageIdentity =
-                    Boolean(
-                        messageIds
-                        &&
-                        baselineMessageIds.has(
-                            messageIds
-                        )
-                    );
-
-
-                // A genuinely new assistant message is authoritative even if
-                // its JSON text is identical to an older answer. This is
-                // essential when retrying the same photo.
                 if (
                     !existedBefore
-                    &&
-                    !sameMessageIdentity
-                ) {
-
-                    candidateReplies.push(
-                        text
-                    );
-
-                    continue;
-                }
-
-
-                // ChatGPT can create an assistant container before the answer
-                // starts streaming, then fill that same DOM node in-place.
-                // Accept it only when the text actually changed after send.
-                if (
-                    existedBefore
-                    &&
+                    ||
                     text !== previousText
                 ) {
 
@@ -1741,11 +1874,17 @@ async function getReliableVisionReply(
 
 
             const domReply =
-                candidateReplies.length > 0
-                    ? candidateReplies[
-                        candidateReplies.length - 1
-                    ]
-                    : "";
+                currentTurnCandidates.length > 0
+                    ? currentTurnCandidates[
+                        currentTurnCandidates.length - 1
+                    ].text
+                    : (
+                        candidateReplies.length > 0
+                            ? candidateReplies[
+                                candidateReplies.length - 1
+                            ]
+                            : ""
+                    );
 
 
             console.log(
@@ -1770,7 +1909,7 @@ async function getReliableVisionReply(
                 if (validJson) {
 
                     console.log(
-                        "VALID FINAL VISION JSON FOUND IN CURRENT VISION TURN:",
+                        "VALID FINAL VISION JSON FOUND IN DOM FALLBACK:",
                         validJson
                     );
 
