@@ -2962,10 +2962,6 @@ async def retry_delete_callback(
         )
         return
 
-    user_id = get_telegram_user_id(
-        update
-    )
-
     job_path = os.path.join(
         JOBS_DIR,
         f"{job_id}.json"
@@ -3003,6 +2999,39 @@ async def retry_delete_callback(
         )
         return
 
+    retry_group = _get_retry_group_jobs(
+        job
+    )
+
+    # Safety guard for old/stale Telegram messages:
+    # a legacy "retrydeleteconfirm" button must never silently delete hidden
+    # duplicates that were not explicitly shown to the operator.
+    if len(retry_group) > 1:
+        await query.answer(
+            "این مورد چند Job تکراری دارد؛ از /retry لیست جدید را باز کن و حذف گروهی را تأیید کن.",
+            show_alert=True
+        )
+        return
+
+
+    target_ids = []
+
+    for grouped_job in retry_group:
+        grouped_job_id = str(
+            grouped_job.get("jobId") or ""
+        ).strip()
+
+        if grouped_job_id:
+            target_ids.append(
+                grouped_job_id
+            )
+
+    target_ids = list(
+        dict.fromkeys(
+            target_ids
+        )
+    )
+
     try:
         await query.answer()
     except Exception:
@@ -3012,29 +3041,74 @@ async def retry_delete_callback(
         job.get("status") or ""
     ).strip()
 
-    if current_status == "vision_failed":
-        warning_text = (
-            "⚠️ این Vision failed به‌طور کامل حذف شود؟\n"
-            "عکس ذخیره‌شده + فایل Job + رکورد Queue پاک می‌شوند.\n"
-            "اگر همین عکس چند Job تکراری داشته باشد، همه آن‌ها هم پاک می‌شوند.\n"
-            "بعد از حذف، Retry یا بازیابی از داخل ربات ممکن نیست."
+    if len(target_ids) > 1:
+        warning_lines = [
+            "⚠️ این مورد با چند Job تکراری گروه شده است.",
+            f"در صورت تأیید، هر {len(target_ids)} Job زیر حذف کامل می‌شوند:",
+            "",
+        ]
+
+        for target_id in target_ids[:10]:
+            warning_lines.append(
+                f"• {target_id}"
+            )
+
+        if len(target_ids) > 10:
+            warning_lines.append(
+                f"• ... و {len(target_ids) - 10} Job دیگر"
+            )
+
+        warning_lines.extend(
+            [
+                "",
+                "عکس‌ها + فایل‌های Job + رکوردهای Queue پاک می‌شوند.",
+                "بعد از حذف، بازیابی از داخل ربات ممکن نیست.",
+            ]
         )
+
+        warning_text = "\n".join(
+            warning_lines
+        )
+
+        confirm_callback = (
+            f"retrydeletegroupconfirm:{job_id}"
+        )
+
+        confirm_text = (
+            f"✅ حذف همه {len(target_ids)} مورد"
+        )
+
     else:
-        warning_text = (
-            "⚠️ این پردازش به‌طور کامل حذف شود؟\n"
-            "عکس ذخیره‌شده + فایل Job + رکورد Queue پاک می‌شوند.\n"
-            "ممکن است JSON استخراج‌شده هم از بین برود."
+        if current_status == "vision_failed":
+            warning_text = (
+                "⚠️ این Vision failed به‌طور کامل حذف شود؟\n"
+                "عکس ذخیره‌شده + فایل Job + رکورد Queue پاک می‌شوند.\n"
+                "بعد از حذف، Retry یا بازیابی از داخل ربات ممکن نیست.\n\n"
+                f"Job ID: {job_id}"
+            )
+        else:
+            warning_text = (
+                "⚠️ این پردازش به‌طور کامل حذف شود؟\n"
+                "عکس ذخیره‌شده + فایل Job + رکورد Queue پاک می‌شوند.\n"
+                "ممکن است JSON استخراج‌شده هم از بین برود.\n\n"
+                f"Job ID: {job_id}"
+            )
+
+        confirm_callback = (
+            f"retrydeleteconfirm:{job_id}"
         )
+
+        confirm_text = "✅ حذف کامل"
 
     await _safe_callback_message(
         query,
-        warning_text + "\n\n" + f"Job ID: {job_id}",
+        warning_text,
         reply_markup=InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton(
-                        text="✅ حذف کامل",
-                        callback_data=f"retrydeleteconfirm:{job_id}"
+                        text=confirm_text,
+                        callback_data=confirm_callback
                     ),
                     InlineKeyboardButton(
                         text="↩️ انصراف",
@@ -3044,7 +3118,6 @@ async def retry_delete_callback(
             ]
         )
     )
-
 
 async def retry_delete_confirm_callback(
     update: Update,
@@ -3210,6 +3283,191 @@ async def retry_delete_confirm_callback(
     try:
         await query.answer(
             "حذف کامل انجام شد."
+        )
+    except Exception:
+        pass
+
+    try:
+        await query.edit_message_text(
+            message
+        )
+    except Exception:
+        await _safe_callback_message(
+            query,
+            message
+        )
+
+
+async def retry_delete_group_confirm_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    if query is None:
+        return
+
+    if not is_allowed_user(update):
+        try:
+            await query.answer(
+                "دسترسی ندارید.",
+                show_alert=True
+            )
+        except Exception:
+            pass
+        return
+
+    callback_data = str(
+        query.data or ""
+    )
+
+    prefix = "retrydeletegroupconfirm:"
+
+    if not callback_data.startswith(
+        prefix
+    ):
+        return
+
+    job_id = callback_data[
+        len(prefix):
+    ].strip()
+
+    job_path = os.path.join(
+        JOBS_DIR,
+        f"{job_id}.json"
+    )
+
+    if not os.path.exists(job_path):
+        await query.answer(
+            "این پردازش پیدا نشد.",
+            show_alert=True
+        )
+        return
+
+    try:
+        job = _load_job_file(
+            job_path
+        )
+    except Exception:
+        await query.answer(
+            "فایل پردازش قابل خواندن نیست.",
+            show_alert=True
+        )
+        return
+
+    if int(job.get("telegramUserId") or 0) not in ALLOWED_USER_IDS:
+        await query.answer(
+            "مالک این پردازش در فهرست کاربران مجاز نیست.",
+            show_alert=True
+        )
+        return
+
+    if job.get("status") not in RETRYABLE_JOB_STATUSES:
+        await query.answer(
+            "این مورد دیگر در لیست Retry نیست.",
+            show_alert=True
+        )
+        return
+
+    retry_group = _get_retry_group_jobs(
+        job
+    )
+
+    if len(retry_group) <= 1:
+        await query.answer(
+            "این مورد دیگر گروه تکراری ندارد؛ از /retry لیست جدید را باز کن.",
+            show_alert=True
+        )
+        return
+
+    deleted_job_ids = []
+    delete_errors = []
+    touched_batch_ids = set()
+
+    for grouped_job in retry_group:
+
+        grouped_job_id = str(
+            grouped_job.get("jobId") or ""
+        ).strip()
+
+        grouped_job_path = str(
+            grouped_job.get("_jobPath")
+            or os.path.join(
+                JOBS_DIR,
+                f"{grouped_job_id}.json"
+            )
+        ).strip()
+
+        grouped_image_path = str(
+            grouped_job.get("imagePath") or ""
+        ).strip()
+
+        grouped_batch_id = str(
+            grouped_job.get("batchId") or ""
+        ).strip()
+
+        if grouped_batch_id:
+            touched_batch_ids.add(
+                grouped_batch_id
+            )
+
+        try:
+            _db_delete_queue_job(
+                grouped_job_id
+            )
+        except Exception as ex:
+            delete_errors.append(
+                f"DB {grouped_job_id}: {ex}"
+            )
+            continue
+
+        for path in (
+            grouped_image_path,
+            grouped_job_path,
+        ):
+            if not path:
+                continue
+
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as ex:
+                delete_errors.append(
+                    f"{path}: {ex}"
+                )
+
+        deleted_job_ids.append(
+            grouped_job_id
+        )
+
+    for grouped_batch_id in touched_batch_ids:
+        try:
+            _db_mark_batch_done_if_complete(
+                grouped_batch_id
+            )
+        except Exception:
+            traceback.print_exc()
+
+    if delete_errors:
+        message = (
+            "⚠️ حذف گروهی انجام شد، اما بعضی فایل‌ها یا رکوردها کامل پاک نشدند.\n"
+            f"تعداد Job حذف‌شده: {len(deleted_job_ids)}\n\n"
+            + "\n".join(delete_errors[:5])
+        )
+    else:
+        message = (
+            "🗑 حذف گروهی کامل شد.\n"
+            f"تعداد Job حذف‌شده: {len(deleted_job_ids)}\n\n"
+            + "\n".join(
+                f"• {deleted_id}"
+                for deleted_id in deleted_job_ids[:10]
+            )
+        )
+
+    try:
+        await query.answer(
+            "حذف گروهی انجام شد."
         )
     except Exception:
         pass
@@ -4382,6 +4640,14 @@ def main():
         CallbackQueryHandler(
             retry_delete_confirm_callback,
             pattern=r"^retrydeleteconfirm:"
+        )
+    )
+
+
+    app.add_handler(
+        CallbackQueryHandler(
+            retry_delete_group_confirm_callback,
+            pattern=r"^retrydeletegroupconfirm:"
         )
     )
 
