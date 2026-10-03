@@ -1782,7 +1782,7 @@ async function getReliableVisionReply(
     );
 
 
-    const timeoutMs = 90000;
+    const timeoutMs = 30000;
     const pollMs = 500;
     const startedAt =
         Date.now();
@@ -1798,6 +1798,68 @@ async function getReliableVisionReply(
 
 
         try {
+
+            // -------------------------------------------------
+            // FAST PATH: NEW ASSISTANT NODE AFTER THIS PROMPT
+            // -------------------------------------------------
+            // Before sending the Vision prompt we snapshot the assistant
+            // message count. If the count grows, the newest assistant node
+            // belongs to the current prompt. This is the simple behavior
+            // that worked reliably before the recent correlation changes.
+            const assistantNodesNow =
+                getAssistantMessageNodes();
+
+
+            const baselineCount =
+                Number(
+                    assistantBaseline?.count || 0
+                );
+
+
+            if (
+                assistantNodesNow.length > baselineCount
+            ) {
+
+                const newestAssistantNode =
+                    assistantNodesNow[
+                        assistantNodesNow.length - 1
+                    ];
+
+
+                const newestAssistantText =
+                    getAssistantNodeText(
+                        newestAssistantNode
+                    );
+
+
+                console.log(
+                    `Vision NEW assistant node ${pollNumber}:`,
+                    {
+                        baselineCount,
+                        currentCount:
+                            assistantNodesNow.length,
+                        text:
+                            newestAssistantText
+                    }
+                );
+
+
+                validJson =
+                    parseValidVisionJson(
+                        newestAssistantText
+                    );
+
+
+                if (validJson) {
+
+                    console.log(
+                        "VALID FINAL VISION JSON FOUND IN NEW ASSISTANT NODE:",
+                        validJson
+                    );
+
+                    return validJson;
+                }
+            }
 
             const turnNodes =
                 Array.from(
@@ -2042,7 +2104,7 @@ async function getReliableVisionReply(
 
 
     throw new Error(
-        "Vision answer appeared without a correlatable new assistant message ID, or no valid JSON was produced within 90 seconds."
+        "Vision answer was not captured as a new assistant reply within 30 seconds."
     );
 }
 
