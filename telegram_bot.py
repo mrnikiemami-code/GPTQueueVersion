@@ -138,7 +138,7 @@ TELEGRAM_STATUS_MESSAGE_TIMEOUT_SECONDS = 8
 # Hard upper bound for one Vision job as observed by the Telegram worker.
 # The underlying Bridge call runs in a worker thread, so the outer asyncio
 # timeout is authoritative and prevents the queue from hanging indefinitely.
-VISION_JOB_TIMEOUT_SECONDS = 120
+VISION_JOB_TIMEOUT_SECONDS = 45
 
 # =========================================================
 # TELEGRAM NETWORK SETTINGS
