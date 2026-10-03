@@ -137,7 +137,7 @@ TELEGRAM_STATUS_MESSAGE_TIMEOUT_SECONDS = 8
 # Hard upper bound for one Vision job as observed by the Telegram worker.
 # The underlying Bridge call runs in a worker thread, so the outer asyncio
 # timeout is authoritative and prevents the queue from hanging indefinitely.
-VISION_JOB_TIMEOUT_SECONDS = 50
+VISION_JOB_TIMEOUT_SECONDS = 75
 
 # =========================================================
 # TELEGRAM NETWORK SETTINGS
@@ -1500,6 +1500,7 @@ def test_google_sheet_sync(destination=DESTINATION_COURSE):
 # =========================================================
 
 RETRYABLE_JOB_STATUSES = {
+    "vision_failed",
     "vision_done",
     "sheet_pending",
     "sheet_unconfirmed",
@@ -1955,6 +1956,66 @@ async def retry_job_by_id(update, job_id):
 
         message = (
             "ℹ️ این پردازش قبلاً نهایی شده و نیازی به Retry ندارد.\n\n"
+            f"Job ID: {job_id}"
+        )
+
+        if update.callback_query:
+            await _safe_callback_message(
+                update.callback_query,
+                message
+            )
+        else:
+            await safe_reply(
+                update,
+                message
+            )
+
+        return
+
+    # =====================================================
+    # MANUAL RETRY FOR A FAILED VISION JOB
+    #
+    # The original Telegram photo is already persisted. A user-requested
+    # retry must reuse that exact image and put the same Job back on the
+    # serial Vision queue; the user must not upload the photo again.
+    # =====================================================
+
+    if current_status == "vision_failed":
+
+        image_path = job.get(
+            "imagePath"
+        )
+
+        if not image_path or not os.path.exists(image_path):
+
+            message = (
+                "❌ تصویر ذخیره‌شده این پردازش پیدا نشد؛ "
+                "Vision قابل Retry نیست.\n\n"
+                f"Job ID: {job_id}"
+            )
+
+            if update.callback_query:
+                await _safe_callback_message(
+                    update.callback_query,
+                    message
+                )
+            else:
+                await safe_reply(
+                    update,
+                    message
+                )
+
+            return
+
+        update_persisted_job(
+            job_path,
+            status="queued",
+            lastError=None,
+        )
+
+        message = (
+            "🔄 پردازش Vision دوباره در صف قرار گرفت.\n"
+            "📷 همان عکس ذخیره‌شده استفاده می‌شود و لازم نیست دوباره ارسالش کنی.\n\n"
             f"Job ID: {job_id}"
         )
 
