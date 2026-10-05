@@ -1707,6 +1707,7 @@ RETRYABLE_JOB_STATUSES = {
     "vision_done",
     "sheet_pending",
     "sheet_unconfirmed",
+    "sheet_submitted",
     "sheet_failed",
     "failed_after_vision",
 }
@@ -2412,27 +2413,6 @@ async def retry_job_by_id(update, job_id, application=None):
         ""
     )
 
-    if current_status == "sheet_submitted":
-
-        message = (
-            "ℹ️ این درخواست قبلاً به Google Apps Script تحویل شده است.\n"
-            "برای جلوگیری از ثبت تکراری، POST مجدد انجام نمی‌شود.\n\n"
-            f"Job ID: {job_id}"
-        )
-
-        if update.callback_query:
-            await _safe_callback_message(
-                update.callback_query,
-                message
-            )
-        else:
-            await safe_reply(
-                update,
-                message
-            )
-
-        return
-
     if current_status == "retry_dismissed":
 
         message = (
@@ -2694,8 +2674,8 @@ async def retry_job_by_id(update, job_id, application=None):
         return
 
     status_message = (
-        "🔎 ابتدا وضعیت ثبت قبلی در Google Sheet بررسی می‌شود...\n"
-        "🚫 Vision دوباره اجرا نمی‌شود."
+        "🔎 در حال بررسی وضعیت ثبت این مورد در Google Sheet...\n"
+        "ارسال مجدد انجام نمی‌شود مگر اینکه مطمئن باشیم ثبت قبلی انجام نشده است."
     )
 
     if update.callback_query:
@@ -2758,6 +2738,7 @@ async def retry_job_by_id(update, job_id, application=None):
             if current_status in (
                 "sheet_pending",
                 "sheet_unconfirmed",
+                "sheet_submitted",
             ):
                 update_persisted_job(
                     job_path,
@@ -2765,12 +2746,17 @@ async def retry_job_by_id(update, job_id, application=None):
                     requestId=request_id,
                     lastError="Status endpoint still unavailable."
                 )
+                _db_update_queue_job(
+                    job_id,
+                    status="sheet_unconfirmed",
+                )
 
                 message = (
-                    "ℹ️ وضعیت نهایی هنوز از Google قابل خواندن نیست.\n\n"
-                    "برای جلوگیری از ثبت تکراری، POST مجدد انجام نشد.\n"
-                    "ممکن است رکورد قبلاً ثبت شده یا تکراری تشخیص داده شده باشد.\n"
-                    f"Job ID: {job_id}"
+                    "⚠️ هنوز نتوانستم وضعیت نهایی این مورد را از Google تأیید کنم.\n\n"
+                    "ممکن است اطلاعات قبلاً در شیت ثبت شده باشد.\n"
+                    "برای جلوگیری از ثبت تکراری، دوباره ارسالش نکردم.\n\n"
+                    f"Job ID: {job_id}\n"
+                    "می‌توانی بعداً دوباره /retry را برای بررسی وضعیت بزنی."
                 )
 
                 if update.callback_query:
@@ -2811,6 +2797,10 @@ async def retry_job_by_id(update, job_id, application=None):
                     status="sheet_unconfirmed",
                     requestId=request_id,
                     lastError=str(ex)
+                )
+                _db_update_queue_job(
+                    job_id,
+                    status="sheet_unconfirmed",
                 )
 
                 print("")
@@ -2854,12 +2844,17 @@ async def retry_job_by_id(update, job_id, application=None):
                 googleResponse=google_response,
                 lastError=None
             )
+            _db_update_queue_job(
+                job_id,
+                status="sheet_submitted",
+            )
 
             message = (
-                "✅ درخواست به Google Apps Script تحویل شد.\n"
-                "ℹ️ نتیجه نهایی (ثبت جدید یا تکراری) "
-                "فعلاً قابل خواندن نیست.\n\n"
-                "برای جلوگیری از ثبت تکراری، POST دیگری انجام نخواهد شد."
+                "✅ اطلاعات به Google تحویل شده است.\n"
+                "تأیید نهایی هنوز قابل دریافت نیست.\n\n"
+                "ممکن است رکورد در شیت ثبت شده باشد؛ "
+                "برای جلوگیری از ثبت تکراری، دوباره ارسال نمی‌شود.\n"
+                f"Job ID: {job_id}"
             )
 
         elif google_response.get("duplicate") is True:
@@ -2870,6 +2865,10 @@ async def retry_job_by_id(update, job_id, application=None):
                 requestId=request_id,
                 googleResponse=google_response,
                 lastError=None
+            )
+            _db_update_queue_job(
+                job_id,
+                status="completed_duplicate",
             )
 
             message = _duplicate_message_from_response(
@@ -2886,6 +2885,10 @@ async def retry_job_by_id(update, job_id, application=None):
                 googleResponse=google_response,
                 lastError=None
             )
+            _db_update_queue_job(
+                job_id,
+                status="completed",
+            )
 
             row = google_response.get(
                 "row",
@@ -2893,7 +2896,8 @@ async def retry_job_by_id(update, job_id, application=None):
             )
 
             message = (
-                "✅ وضعیت تأیید شد؛ اطلاعات در Google Sheet ثبت شده است.\n\n"
+                "✅ بررسی شد: این مورد قبلاً در Google Sheet ثبت شده است.\n"
+                "ارسال مجدد انجام نشد.\n\n"
                 f"ردیف: {row}\n"
                 f"Job ID: {job_id}"
             )
@@ -2912,6 +2916,10 @@ async def retry_job_by_id(update, job_id, application=None):
                 requestId=request_id,
                 googleResponse=google_response,
                 lastError=str(error_message)
+            )
+            _db_update_queue_job(
+                job_id,
+                status="sheet_failed",
             )
 
             message = (
@@ -4351,11 +4359,11 @@ async def _process_queued_job(application, queue_job):
         await _safe_bot_send(
             application.bot,
             chat_id,
-            "⚠️ Vision با موفقیت انجام شد و JSON محفوظ است، "
-            "اما نتیجه Google Sheet تأیید نشد.\n\n"
+            "⚠️ اطلاعات ارسال شد، اما تأیید نهایی از Google دریافت نشد.\n\n"
+            "ممکن است اطلاعات در شیت ثبت شده باشد.\n"
+            "برای جلوگیری از ثبت تکراری، ارسال مجدد خودکار انجام نمی‌شود.\n\n"
             f"Job ID: {job_id}\n"
-            "🚫 Vision دوباره اجرا نخواهد شد.\n"
-            "برای بررسی امن از /retry استفاده کن.",
+            "برای بررسی وضعیت، /retry را بزن.",
         )
         _db_mark_batch_done_if_complete(batch_id)
         return
@@ -4381,9 +4389,11 @@ async def _process_queued_job(application, queue_job):
         await _safe_bot_send(
             application.bot,
             chat_id,
-            "✅ درخواست به Google Sheet تحویل شد.\n"
-            "ℹ️ نتیجه نهایی فعلاً قابل خواندن نیست، اما POST مجدد انجام نمی‌شود.\n"
-            f"Job ID: {job_id}",
+            "✅ اطلاعات به Google ارسال شد.\n"
+            "ℹ️ تأیید نهایی هنوز دریافت نشده است؛ ممکن است رکورد همین حالا در شیت ثبت شده باشد.\n"
+            "برای جلوگیری از ثبت تکراری، ارسال مجدد خودکار انجام نمی‌شود.\n\n"
+            f"Job ID: {job_id}\n"
+            "برای بررسی وضعیت، /retry را بزن.",
         )
 
     elif google_response.get("duplicate") is True:
