@@ -2333,7 +2333,7 @@ def _duplicate_message_from_response(data, google_response):
     )
 
 
-async def retry_job_by_id(update, job_id):
+async def retry_job_by_id(update, job_id, application=None):
     user_id = get_telegram_user_id(update)
 
     if not user_id:
@@ -2538,11 +2538,16 @@ async def retry_job_by_id(update, job_id):
             except Exception:
                 pass
 
+            print(
+                "MANUAL RETRY QUEUE ERROR:",
+                job_id,
+                repr(ex),
+            )
+
             message = (
-                "❌ Retry در صف SQLite ثبت نشد و اجرا نخواهد شد.\n"
-                "وضعیت Job به vision_failed برگردانده شد.\n\n"
-                f"Job ID: {job_id}\n"
-                f"خطا: {ex}"
+                "❌ تلاش مجدد شروع نشد.\n"
+                "عکس و اطلاعات این پردازش محفوظ مانده‌اند؛ لطفاً دوباره Retry را بزن.\n\n"
+                f"Job ID: {job_id}"
             )
 
             if update.callback_query:
@@ -2591,9 +2596,9 @@ async def retry_job_by_id(update, job_id):
             )
 
             message = (
-                "❌ این پردازش فعلاً قابل Retry نیست چون وضعیت داخلی آن "
-                "با وضعیت ذخیره‌شده هماهنگ نیست.\n"
-                "هیچ پردازش یا فایلی حذف نشده است.\n\n"
+                "❌ تلاش مجدد فعلاً شروع نشد.\n"
+                "عکس و اطلاعات این پردازش محفوظ مانده‌اند؛ "
+                "لطفاً چند لحظه بعد دوباره Retry را بزن.\n\n"
                 f"Job ID: {job_id}"
             )
 
@@ -2610,8 +2615,13 @@ async def retry_job_by_id(update, job_id):
 
             return
 
+        if application is not None:
+            await _ensure_vision_queue_worker(
+                application
+            )
+
         message = (
-            "🔄 پردازش Vision واقعاً در صف SQLite قرار گرفت.\n"
+            "🔄 پردازش تصویر دوباره در صف قرار گرفت.\n"
             "📷 همان عکس ذخیره‌شده استفاده می‌شود و لازم نیست دوباره ارسالش کنی.\n\n"
             f"Job ID: {job_id}"
         )
@@ -2991,7 +3001,8 @@ async def retry_command(
 
         await retry_job_by_id(
             update,
-            selected_job["jobId"]
+            selected_job["jobId"],
+            context.application,
         )
         return
 
@@ -3094,7 +3105,8 @@ async def retry_callback(
 
     await retry_job_by_id(
         update,
-        job_id
+        job_id,
+        context.application,
     )
 
 
@@ -4494,9 +4506,51 @@ async def vision_queue_worker(application):
             await asyncio.sleep(2.0)
 
 
-async def post_init(application):
+async def _ensure_vision_queue_worker(application):
+    """
+    Ensure the serial Vision worker is alive.
+
+    Manual Retry must never only change persisted state and then silently wait
+    forever because the background worker task is missing/cancelled.
+    """
     global queue_worker_task
 
+    if (
+        queue_worker_task is not None
+        and not queue_worker_task.done()
+    ):
+        return False
+
+    if queue_worker_task is not None:
+        try:
+            worker_error = queue_worker_task.exception()
+            if worker_error:
+                print(
+                    "VISION QUEUE WORKER WAS STOPPED:",
+                    repr(worker_error),
+                )
+        except asyncio.CancelledError:
+            print(
+                "VISION QUEUE WORKER WAS CANCELLED; restarting."
+            )
+        except Exception as ex:
+            print(
+                "VISION QUEUE WORKER STATE CHECK FAILED:",
+                repr(ex),
+            )
+
+    queue_worker_task = application.create_task(
+        vision_queue_worker(application)
+    )
+
+    print(
+        "VISION QUEUE WORKER STARTED/RECOVERED."
+    )
+
+    return True
+
+
+async def post_init(application):
     await asyncio.to_thread(
         init_queue_db
     )
@@ -4504,8 +4558,8 @@ async def post_init(application):
     await _recover_incomplete_downloads(application)
     await _recover_destination_prompts(application)
 
-    queue_worker_task = application.create_task(
-        vision_queue_worker(application)
+    await _ensure_vision_queue_worker(
+        application
     )
 
     print("")
