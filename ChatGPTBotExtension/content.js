@@ -1743,183 +1743,346 @@ async function getReliableVisionReply(
     );
 
 
+    // =====================================================
+    // PRIMARY: MUTATION OBSERVER
+    //
+    // The previous implementation polled the page and sometimes missed a
+    // ChatGPT reply that was visibly present in the DOM. Here the browser
+    // itself wakes us whenever ChatGPT mutates the conversation DOM.
+    //
+    // We still keep a small interval as a fallback only. Nothing outside
+    // Vision reply capture is changed.
+    // =====================================================
+
     const timeoutMs = 30000;
-    const pollMs = 500;
-    const startedAt =
-        Date.now();
-
-    let pollNumber = 0;
+    const fallbackPollMs = 750;
 
 
-    while (
-        Date.now() - startedAt < timeoutMs
+    function scanForCurrentVisionReply(
+        source
     ) {
 
-        pollNumber++;
+        const selectionNodes =
+            Array.from(
+                document.querySelectorAll(
+                    '[data-chatgpt-selection-message-id]'
+                )
+            );
 
 
-        try {
+        const candidates = [];
 
-            const selectionNodes =
-                Array.from(
-                    document.querySelectorAll(
-                        '[data-chatgpt-selection-message-id]'
+
+        for (
+            const selectionNode
+            of selectionNodes
+        ) {
+
+            const messageId =
+                String(
+                    selectionNode.getAttribute(
+                        'data-chatgpt-selection-message-id'
                     )
-                );
-
-
-            const candidates = [];
-
-
-            for (
-                const selectionNode
-                of selectionNodes
-            ) {
-
-                const messageId =
-                    String(
-                        selectionNode.getAttribute(
-                            'data-chatgpt-selection-message-id'
-                        )
-                        || ""
-                    ).trim();
-
-
-                if (
-                    !messageId
-                    ||
-                    baselineIds.has(
-                        messageId
-                    )
-                ) {
-
-                    continue;
-                }
-
-
-                const turn =
-                    selectionNode.closest(
-                        '[data-chatgpt-search-message-ids]'
-                    );
-
-
-                if (!turn) {
-                    continue;
-                }
-
-
-                const markdownNode =
-                    turn.querySelector(
-                        '[data-markdown-text-style="assistant-message"]'
-                    );
-
-
-                const roleNode =
-                    turn.querySelector(
-                        '[data-conversation-role="assistant"]'
-                    );
-
-
-                if (
-                    !markdownNode
-                    &&
-                    !roleNode
-                ) {
-
-                    continue;
-                }
-
-
-                const text =
-                    getAssistantNodeText(
-                        markdownNode || turn
-                    );
-
-
-                if (!text) {
-                    continue;
-                }
-
-
-                candidates.push({
-
-                    messageId,
-
-                    text
-                });
-            }
+                    || ""
+                ).trim();
 
 
             if (
-                candidates.length > 0
-            ) {
-
-                const latest =
-                    candidates[
-                        candidates.length - 1
-                    ];
-
-
-                console.log(
-                    `Vision NEW assistant message ${pollNumber}:`,
-                    latest.messageId,
-                    latest.text
-                );
-
-
-                for (
-                    let i =
-                        candidates.length - 1;
-                    i >= 0;
-                    i--
-                ) {
-
-                    validJson =
-                        parseValidVisionJson(
-                            candidates[i].text
-                        );
-
-
-                    if (validJson) {
-
-                        console.log(
-                            "VALID FINAL VISION JSON FOUND BY SELECTION MESSAGE ID:",
-                            candidates[i].messageId,
-                            validJson
-                        );
-
-                        return validJson;
-                    }
-                }
-
-            } else if (
-                pollNumber === 1
+                !messageId
                 ||
-                pollNumber % 10 === 0
+                baselineIds.has(
+                    messageId
+                )
             ) {
 
-                console.log(
-                    `Vision DOM check ${pollNumber}: (no new assistant selection message id yet)`
-                );
+                continue;
             }
 
-        } catch (domError) {
 
-            console.warn(
-                "Vision DOM read failed:",
-                domError
-            );
+            const turn =
+                selectionNode.closest(
+                    '[data-chatgpt-search-message-ids]'
+                );
+
+
+            if (!turn) {
+                continue;
+            }
+
+
+            const markdownNode =
+                turn.querySelector(
+                    '[data-markdown-text-style="assistant-message"]'
+                );
+
+
+            const roleNode =
+                turn.querySelector(
+                    '[data-conversation-role="assistant"]'
+                );
+
+
+            if (
+                !markdownNode
+                &&
+                !roleNode
+            ) {
+
+                continue;
+            }
+
+
+            const text =
+                getAssistantNodeText(
+                    markdownNode || turn
+                );
+
+
+            if (!text) {
+                continue;
+            }
+
+
+            candidates.push({
+
+                messageId,
+
+                text
+            });
         }
 
 
-        await sleep(
-            pollMs
+        if (
+            candidates.length <= 0
+        ) {
+
+            return null;
+        }
+
+
+        const latest =
+            candidates[
+                candidates.length - 1
+            ];
+
+
+        console.log(
+            "CHATGPT VISION ANSWER DETECTED",
+            {
+                source,
+                messageId:
+                    latest.messageId,
+                text:
+                    latest.text
+            }
         );
+
+
+        for (
+            let i =
+                candidates.length - 1;
+            i >= 0;
+            i--
+        ) {
+
+            const parsed =
+                parseValidVisionJson(
+                    candidates[i].text
+                );
+
+
+            if (parsed) {
+
+                console.log(
+                    "VALID FINAL VISION JSON FOUND:",
+                    {
+                        source,
+                        messageId:
+                            candidates[i].messageId,
+                        json:
+                            parsed
+                    }
+                );
+
+                return parsed;
+            }
+        }
+
+
+        // The assistant turn may still be streaming and contain incomplete
+        // JSON. MutationObserver will call this scanner again as text grows.
+        return null;
     }
 
 
-    throw new Error(
-        "Vision answer was not captured as a new assistant message within 30 seconds."
+    // One immediate scan covers the case where the answer appeared between
+    // sendPromptDirectly() resolving and this function installing observer.
+    validJson =
+        scanForCurrentVisionReply(
+            "initial-scan"
+        );
+
+
+    if (validJson) {
+        return validJson;
+    }
+
+
+    return await new Promise(
+        (
+            resolve,
+            reject
+        ) => {
+
+            let settled = false;
+
+
+            const finishSuccess = (
+                result
+            ) => {
+
+                if (settled) {
+                    return;
+                }
+
+
+                settled = true;
+
+                observer.disconnect();
+
+                clearInterval(
+                    fallbackTimer
+                );
+
+                clearTimeout(
+                    timeoutTimer
+                );
+
+                resolve(
+                    result
+                );
+            };
+
+
+            const finishFailure = () => {
+
+                if (settled) {
+                    return;
+                }
+
+
+                settled = true;
+
+                observer.disconnect();
+
+                clearInterval(
+                    fallbackTimer
+                );
+
+                reject(
+                    new Error(
+                        "Vision answer was not captured as a new assistant message within 30 seconds."
+                    )
+                );
+            };
+
+
+            const tryCapture = (
+                source
+            ) => {
+
+                if (settled) {
+                    return;
+                }
+
+
+                try {
+
+                    const result =
+                        scanForCurrentVisionReply(
+                            source
+                        );
+
+
+                    if (result) {
+
+                        finishSuccess(
+                            result
+                        );
+                    }
+
+                } catch (error) {
+
+                    console.warn(
+                        "Vision reply capture scan failed:",
+                        source,
+                        error
+                    );
+                }
+            };
+
+
+            const observer =
+                new MutationObserver(
+                    () => {
+
+                        tryCapture(
+                            "mutation-observer"
+                        );
+                    }
+                );
+
+
+            const observeRoot =
+                document.querySelector(
+                    "main"
+                )
+                ||
+                document.body
+                ||
+                document.documentElement;
+
+
+            observer.observe(
+                observeRoot,
+                {
+                    childList: true,
+                    subtree: true,
+                    characterData: true
+                }
+            );
+
+
+            console.log(
+                "VISION MutationObserver armed."
+            );
+
+
+            const fallbackTimer =
+                setInterval(
+                    () => {
+
+                        tryCapture(
+                            "fallback-poll"
+                        );
+                    },
+                    fallbackPollMs
+                );
+
+
+            const timeoutTimer =
+                setTimeout(
+                    finishFailure,
+                    timeoutMs
+                );
+
+
+            // Close the tiny race between the first immediate scan and
+            // observer.observe().
+            tryCapture(
+                "post-observer-scan"
+            );
+        }
     );
 }
 
