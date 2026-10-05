@@ -1707,7 +1707,6 @@ RETRYABLE_JOB_STATUSES = {
     "vision_done",
     "sheet_pending",
     "sheet_unconfirmed",
-    "sheet_submitted",
     "sheet_failed",
     "failed_after_vision",
 }
@@ -2111,6 +2110,22 @@ def _get_retry_group_jobs(selected_job):
     return matches
 
 
+def _retry_status_label(status):
+    labels = {
+        "vision_failed": "نیاز به تلاش مجدد برای استخراج اطلاعات",
+        "vision_done": "اطلاعات استخراج شده؛ ارسال نهایی نشده",
+        "sheet_pending": "در انتظار نتیجه ثبت",
+        "sheet_unconfirmed": "نیاز به بررسی وضعیت ثبت",
+        "sheet_failed": "ارسال به شیت ناموفق",
+        "failed_after_vision": "استخراج انجام شده؛ ثبت نهایی نشده",
+    }
+
+    return labels.get(
+        str(status or "").strip(),
+        "نیاز به بررسی"
+    )
+
+
 def _retry_job_label(job, number):
     data = job.get("data") or {}
 
@@ -2163,7 +2178,7 @@ def _retry_job_label(job, number):
         full_name
         or phone
         or instagram_id
-        or "Vision failed"
+        or "اطلاعات استخراج نشده"
     )
 
     lines = [
@@ -3031,7 +3046,7 @@ async def retry_command(
         )
 
         lines.append(
-            f"   وضعیت: {job.get('status', '-')}"
+            f"   وضعیت: {_retry_status_label(job.get('status'))}"
         )
 
         lines.append("")
