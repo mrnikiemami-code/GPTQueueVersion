@@ -509,6 +509,82 @@ def _db_update_queue_job(job_id, **changes):
         )
 
 
+def _db_requeue_failed_vision_job(job_id):
+    """
+    Requeue one failed Vision job in the authoritative SQLite queue.
+
+    The JSON job file is only a persisted mirror. The serial worker claims
+    work exclusively from queue_jobs, so a manual Retry is not real until
+    this row is moved from vision_failed -> queued.
+
+    Also reopen the owning batch so its DB state no longer says finished
+    while one of its jobs is queued again.
+    """
+    now = _utc_now_iso()
+
+    with _db_connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+
+        row = db.execute(
+            """
+            SELECT job_id, batch_id, status
+            FROM queue_jobs
+            WHERE job_id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+
+        if not row:
+            db.execute("ROLLBACK")
+            return {
+                "ok": False,
+                "reason": "queue_row_missing",
+            }
+
+        if row["status"] != "vision_failed":
+            db.execute("ROLLBACK")
+            return {
+                "ok": False,
+                "reason": "queue_status_changed",
+                "status": row["status"],
+            }
+
+        cursor = db.execute(
+            """
+            UPDATE queue_jobs
+            SET status = 'queued',
+                updated_at = ?
+            WHERE job_id = ?
+              AND status = 'vision_failed'
+            """,
+            (now, job_id),
+        )
+
+        if cursor.rowcount != 1:
+            db.execute("ROLLBACK")
+            return {
+                "ok": False,
+                "reason": "queue_requeue_race",
+            }
+
+        db.execute(
+            """
+            UPDATE batches
+            SET state = 'queued',
+                updated_at = ?
+            WHERE batch_id = ?
+            """,
+            (now, row["batch_id"]),
+        )
+
+        db.execute("COMMIT")
+
+    return {
+        "ok": True,
+        "batch_id": row["batch_id"],
+    }
+
+
 def _db_delete_queue_job(job_id):
     with _db_connect() as db:
         db.execute(
@@ -2417,14 +2493,100 @@ async def retry_job_by_id(update, job_id):
 
             return
 
+        # First update the persisted mirror, then move the authoritative
+        # SQLite queue row. If the DB requeue fails, restore the JSON status so
+        # the UI never claims a Retry was queued when the worker cannot see it.
         update_persisted_job(
             job_path,
             status="queued",
             lastError=None,
         )
 
+        try:
+            requeue_result = await asyncio.to_thread(
+                _db_requeue_failed_vision_job,
+                job_id,
+            )
+        except Exception as ex:
+            try:
+                update_persisted_job(
+                    job_path,
+                    status="vision_failed",
+                    lastError=(
+                        "Manual Retry DB requeue failed: "
+                        + str(ex)
+                    ),
+                )
+            except Exception:
+                pass
+
+            message = (
+                "❌ Retry در صف SQLite ثبت نشد و اجرا نخواهد شد.\n"
+                "وضعیت Job به vision_failed برگردانده شد.\n\n"
+                f"Job ID: {job_id}\n"
+                f"خطا: {ex}"
+            )
+
+            if update.callback_query:
+                await _safe_callback_message(
+                    update.callback_query,
+                    message
+                )
+            else:
+                await safe_reply(
+                    update,
+                    message
+                )
+
+            return
+
+        if not requeue_result.get("ok"):
+            reason = str(
+                requeue_result.get("reason") or "unknown"
+            )
+
+            current_db_status = str(
+                requeue_result.get("status") or ""
+            )
+
+            rollback_error = (
+                "Manual Retry was not queued in SQLite: "
+                + reason
+            )
+
+            if current_db_status:
+                rollback_error += (
+                    f" (db_status={current_db_status})"
+                )
+
+            update_persisted_job(
+                job_path,
+                status="vision_failed",
+                lastError=rollback_error,
+            )
+
+            message = (
+                "❌ Retry واقعاً وارد صف پردازش نشد؛ "
+                "برای جلوگیری از گیرکردن، Job در حالت vision_failed باقی ماند.\n\n"
+                f"Job ID: {job_id}\n"
+                f"علت: {reason}"
+            )
+
+            if update.callback_query:
+                await _safe_callback_message(
+                    update.callback_query,
+                    message
+                )
+            else:
+                await safe_reply(
+                    update,
+                    message
+                )
+
+            return
+
         message = (
-            "🔄 پردازش Vision دوباره در صف قرار گرفت.\n"
+            "🔄 پردازش Vision واقعاً در صف SQLite قرار گرفت.\n"
             "📷 همان عکس ذخیره‌شده استفاده می‌شود و لازم نیست دوباره ارسالش کنی.\n\n"
             f"Job ID: {job_id}"
         )
