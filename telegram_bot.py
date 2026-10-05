@@ -513,12 +513,10 @@ def _db_requeue_failed_vision_job(job_id):
     """
     Requeue one failed Vision job in the authoritative SQLite queue.
 
-    The JSON job file is only a persisted mirror. The serial worker claims
-    work exclusively from queue_jobs, so a manual Retry is not real until
-    this row is moved from vision_failed -> queued.
-
-    Also reopen the owning batch so its DB state no longer says finished
-    while one of its jobs is queued again.
+    JSON is only the persisted mirror; the worker claims from queue_jobs.
+    If an older bug left the DB row stuck on processing_vision while the
+    persisted Job is already vision_failed, manual Retry repairs that stale
+    state and requeues it safely.
     """
     now = _utc_now_iso()
 
@@ -541,12 +539,27 @@ def _db_requeue_failed_vision_job(job_id):
                 "reason": "queue_row_missing",
             }
 
-        if row["status"] != "vision_failed":
+        current_status = str(
+            row["status"] or ""
+        )
+
+        if current_status == "queued":
+            db.execute("COMMIT")
+            return {
+                "ok": True,
+                "already_queued": True,
+                "batch_id": row["batch_id"],
+            }
+
+        if current_status not in (
+            "vision_failed",
+            "processing_vision",
+        ):
             db.execute("ROLLBACK")
             return {
                 "ok": False,
                 "reason": "queue_status_changed",
-                "status": row["status"],
+                "status": current_status,
             }
 
         cursor = db.execute(
@@ -555,9 +568,13 @@ def _db_requeue_failed_vision_job(job_id):
             SET status = 'queued',
                 updated_at = ?
             WHERE job_id = ?
-              AND status = 'vision_failed'
+              AND status = ?
             """,
-            (now, job_id),
+            (
+                now,
+                job_id,
+                current_status,
+            ),
         )
 
         if cursor.rowcount != 1:
@@ -582,6 +599,7 @@ def _db_requeue_failed_vision_job(job_id):
     return {
         "ok": True,
         "batch_id": row["batch_id"],
+        "recovered_from": current_status,
     }
 
 
@@ -2565,11 +2583,18 @@ async def retry_job_by_id(update, job_id):
                 lastError=rollback_error,
             )
 
+            print(
+                "MANUAL RETRY REQUEUE REFUSED:",
+                job_id,
+                reason,
+                current_db_status,
+            )
+
             message = (
-                "❌ Retry واقعاً وارد صف پردازش نشد؛ "
-                "برای جلوگیری از گیرکردن، Job در حالت vision_failed باقی ماند.\n\n"
-                f"Job ID: {job_id}\n"
-                f"علت: {reason}"
+                "❌ این پردازش فعلاً قابل Retry نیست چون وضعیت داخلی آن "
+                "با وضعیت ذخیره‌شده هماهنگ نیست.\n"
+                "هیچ پردازش یا فایلی حذف نشده است.\n\n"
+                f"Job ID: {job_id}"
             )
 
             if update.callback_query:
@@ -4104,6 +4129,10 @@ async def _process_queued_job(application, queue_job):
             lastError="Persisted image file is missing.",
             visionAttempts=attempts,
         )
+        _db_update_queue_job(
+            job_id,
+            status="vision_failed",
+        )
         await _safe_bot_send(
             application.bot,
             chat_id,
@@ -4149,6 +4178,10 @@ async def _process_queued_job(application, queue_job):
             lastError=None,
             visionAttempts=attempts,
         )
+        _db_update_queue_job(
+            job_id,
+            status="vision_done",
+        )
 
     except TimeoutError as ex:
         # A Vision job must never hold the serial queue for more than the
@@ -4163,6 +4196,10 @@ async def _process_queued_job(application, queue_job):
             destination=destination,
             lastError=timeout_error,
             visionAttempts=attempts,
+        )
+        _db_update_queue_job(
+            job_id,
+            status="vision_failed",
         )
         await _safe_bot_send(
             application.bot,
@@ -4189,6 +4226,10 @@ async def _process_queued_job(application, queue_job):
                 lastError=str(ex),
                 visionAttempts=attempts,
             )
+            _db_update_queue_job(
+                job_id,
+                status="queued",
+            )
             await _safe_bot_send(
                 application.bot,
                 chat_id,
@@ -4202,6 +4243,10 @@ async def _process_queued_job(application, queue_job):
                 destination=destination,
                 lastError=str(ex),
                 visionAttempts=attempts,
+            )
+            _db_update_queue_job(
+                job_id,
+                status="vision_failed",
             )
             await _safe_bot_send(
                 application.bot,
@@ -4219,6 +4264,10 @@ async def _process_queued_job(application, queue_job):
             destination=destination,
             lastError=str(ex),
             visionAttempts=attempts,
+        )
+        _db_update_queue_job(
+            job_id,
+            status="vision_failed",
         )
         print("")
         print("VISION WORKER ERROR:")
@@ -4242,6 +4291,10 @@ async def _process_queued_job(application, queue_job):
             destination=destination,
             requestId=request_id,
             lastError=None,
+        )
+        _db_update_queue_job(
+            job_id,
+            status="sheet_pending",
         )
 
         destination_label = DESTINATION_LABELS.get(
@@ -4272,6 +4325,10 @@ async def _process_queued_job(application, queue_job):
             destination=destination,
             requestId=request_id,
             lastError=str(sheet_ex),
+        )
+        _db_update_queue_job(
+            job_id,
+            status="sheet_unconfirmed",
         )
 
         print("")
@@ -4304,6 +4361,10 @@ async def _process_queued_job(application, queue_job):
             googleResponse=google_response,
             lastError=None,
         )
+        _db_update_queue_job(
+            job_id,
+            status="sheet_submitted",
+        )
 
         await _safe_bot_send(
             application.bot,
@@ -4321,6 +4382,10 @@ async def _process_queued_job(application, queue_job):
             requestId=request_id,
             googleResponse=google_response,
             lastError=None,
+        )
+        _db_update_queue_job(
+            job_id,
+            status="completed_duplicate",
         )
 
         await _safe_bot_send(
@@ -4340,6 +4405,10 @@ async def _process_queued_job(application, queue_job):
             requestId=request_id,
             googleResponse=google_response,
             lastError=None,
+        )
+        _db_update_queue_job(
+            job_id,
+            status="completed",
         )
 
         destination_label = DESTINATION_LABELS.get(
@@ -4379,6 +4448,10 @@ async def _process_queued_job(application, queue_job):
             requestId=request_id,
             googleResponse=google_response,
             lastError=str(error_message),
+        )
+        _db_update_queue_job(
+            job_id,
+            status="sheet_failed",
         )
 
         await _safe_bot_send(
