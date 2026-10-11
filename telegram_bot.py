@@ -1474,15 +1474,16 @@ def send_to_google_sheet_sync(
 
         if (
             return_confirmed_not_found
-            and successful_status_checks == attempts
-            and not_found_checks == attempts
+            and not_found_checks >= 3
+            and not_found_checks == successful_status_checks
         ):
             return {
                 "success": True,
                 "found": False,
                 "status": "not_found",
                 "requestStatus": "not_found_confirmed",
-                "checks": attempts,
+                "checks": successful_status_checks,
+                "networkErrors": attempts - successful_status_checks,
             }
 
         return None
