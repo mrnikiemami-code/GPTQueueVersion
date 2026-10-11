@@ -21,7 +21,10 @@ BRIDGE_URL = "http://127.0.0.1:8767"
 BRIDGE_CONNECT_TIMEOUT_SECONDS = 5
 BRIDGE_REQUEST_READ_TIMEOUT_SECONDS = 30
 
-VISION_RESULT_TIMEOUT_SECONDS = 180
+# Extension waits up to 80s for the downloadable result. Keep the Bridge
+# client slightly above that, but below the Telegram worker's 90s hard limit,
+# so no background polling thread survives after the worker moves on.
+VISION_RESULT_TIMEOUT_SECONDS = 85
 VISION_RESULT_POLL_INTERVAL_SECONDS = 2
 
 # اگر POST فرمان به دلیل قطع لحظه‌ای شبکه Local شکست خورد،
