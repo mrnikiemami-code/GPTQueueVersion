@@ -138,7 +138,12 @@ TELEGRAM_STATUS_MESSAGE_TIMEOUT_SECONDS = 8
 # Hard upper bound for one Vision job as observed by the Telegram worker.
 # The underlying Bridge call runs in a worker thread, so the outer asyncio
 # timeout is authoritative and prevents the queue from hanging indefinitely.
-VISION_JOB_TIMEOUT_SECONDS = 50
+VISION_JOB_TIMEOUT_SECONDS = 90
+
+# User-visible Vision progress window. The extension waits up to 80 seconds
+# for vision-result.json; the worker gets a 10-second outer safety margin.
+VISION_PROGRESS_WINDOW_SECONDS = 80
+VISION_PROGRESS_UPDATE_SECONDS = 10
 
 # =========================================================
 # TELEGRAM NETWORK SETTINGS
@@ -4207,6 +4212,180 @@ async def destination_callback(
         )
 
 
+def _vision_progress_text(
+    job_id,
+    remaining_seconds
+):
+    remaining_seconds = max(
+        0,
+        int(remaining_seconds)
+    )
+
+    completed_steps = min(
+        8,
+        max(
+            0,
+            (
+                VISION_PROGRESS_WINDOW_SECONDS
+                - remaining_seconds
+            )
+            // VISION_PROGRESS_UPDATE_SECONDS
+        )
+    )
+
+    progress_bar = (
+        "🟩" * completed_steps
+        +
+        "⬜" * (
+            8 - completed_steps
+        )
+    )
+
+    if remaining_seconds > 0:
+        timing_line = (
+            f"⏱ زمان باقی‌مانده تقریبی: {remaining_seconds} ثانیه"
+        )
+    else:
+        timing_line = (
+            "⏳ پاسخ در مرحله نهایی است؛ چند ثانیه دیگر صبر کنید."
+        )
+
+    return (
+        "🔍 در حال استخراج اطلاعات تصویر...\n\n"
+        f"{progress_bar}\n"
+        f"{timing_line}\n"
+        f"Job ID: {job_id}\n\n"
+        "عکس‌های بعدی در صف می‌مانند و هم‌زمان وارد ChatGPT نمی‌شوند."
+    )
+
+
+async def _vision_progress_loop(
+    bot,
+    chat_id,
+    message_id,
+    job_id
+):
+    started_at = time.monotonic()
+
+    while True:
+        await asyncio.sleep(
+            VISION_PROGRESS_UPDATE_SECONDS
+        )
+
+        elapsed = int(
+            time.monotonic()
+            - started_at
+        )
+
+        remaining = max(
+            0,
+            VISION_PROGRESS_WINDOW_SECONDS
+            - elapsed
+        )
+
+        try:
+            await asyncio.wait_for(
+                bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=_vision_progress_text(
+                        job_id,
+                        remaining,
+                    ),
+                ),
+                timeout=TELEGRAM_STATUS_MESSAGE_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            print(
+                "VISION PROGRESS UPDATE WARNING:",
+                job_id,
+                repr(ex),
+            )
+
+        if remaining <= 0:
+            return
+
+
+async def _start_vision_progress(
+    application,
+    chat_id,
+    job_id
+):
+    try:
+        message = await asyncio.wait_for(
+            application.bot.send_message(
+                chat_id=chat_id,
+                text=_vision_progress_text(
+                    job_id,
+                    VISION_PROGRESS_WINDOW_SECONDS,
+                ),
+            ),
+            timeout=TELEGRAM_STATUS_MESSAGE_TIMEOUT_SECONDS,
+        )
+    except Exception as ex:
+        print(
+            "VISION PROGRESS START WARNING:",
+            job_id,
+            repr(ex),
+        )
+        return None, None
+
+    task = application.create_task(
+        _vision_progress_loop(
+            application.bot,
+            chat_id,
+            message.message_id,
+            job_id,
+        )
+    )
+
+    return message.message_id, task
+
+
+async def _finish_vision_progress(
+    application,
+    chat_id,
+    message_id,
+    task,
+    final_text
+):
+    if (
+        task is not None
+        and not task.done()
+    ):
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as ex:
+            print(
+                "VISION PROGRESS TASK END WARNING:",
+                repr(ex),
+            )
+
+    if message_id is None:
+        return
+
+    try:
+        await asyncio.wait_for(
+            application.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=final_text,
+            ),
+            timeout=TELEGRAM_STATUS_MESSAGE_TIMEOUT_SECONDS,
+        )
+    except Exception as ex:
+        print(
+            "VISION PROGRESS FINALIZE WARNING:",
+            repr(ex),
+        )
+
+
 async def _process_queued_job(application, queue_job):
     job_id = queue_job["job_id"]
     batch_id = queue_job["batch_id"]
@@ -4253,10 +4432,12 @@ async def _process_queued_job(application, queue_job):
         lastError=None,
     )
 
-    await _safe_bot_send(
-        application.bot,
-        chat_id,
-        f"🔍 در حال استخراج اطلاعات...\nJob ID: {job_id}",
+    progress_message_id, progress_task = (
+        await _start_vision_progress(
+            application,
+            chat_id,
+            job_id,
+        )
     )
 
     try:
@@ -4287,6 +4468,17 @@ async def _process_queued_job(application, queue_job):
             status="vision_done",
         )
 
+        await _finish_vision_progress(
+            application,
+            chat_id,
+            progress_message_id,
+            progress_task,
+            (
+                "✅ استخراج اطلاعات تصویر با موفقیت تمام شد.\n"
+                "⏳ در حال ادامه ثبت اطلاعات..."
+            ),
+        )
+
     except TimeoutError as ex:
         # A Vision job must never hold the serial queue for more than the
         # configured hard timeout. Do not auto-requeue timeouts, otherwise the
@@ -4305,6 +4497,13 @@ async def _process_queued_job(application, queue_job):
             job_id,
             status="vision_failed",
         )
+        await _finish_vision_progress(
+            application,
+            chat_id,
+            progress_message_id,
+            progress_task,
+            "⏱️ زمان پردازش تصویر به پایان رسید؛ عکس محفوظ مانده است.",
+        )
         await _safe_bot_send(
             application.bot,
             chat_id,
@@ -4322,6 +4521,14 @@ async def _process_queued_job(application, queue_job):
 
     except json.JSONDecodeError as ex:
         # Invalid JSON may still be transient, so keep the existing one retry.
+        await _finish_vision_progress(
+            application,
+            chat_id,
+            progress_message_id,
+            progress_task,
+            "⚠️ فایل نتیجه معتبر نبود؛ عکس محفوظ مانده است.",
+        )
+
         if attempts < 2:
             update_persisted_job(
                 job_path,
@@ -4362,6 +4569,14 @@ async def _process_queued_job(application, queue_job):
         return
 
     except Exception as ex:
+        await _finish_vision_progress(
+            application,
+            chat_id,
+            progress_message_id,
+            progress_task,
+            "❌ پردازش تصویر کامل نشد؛ عکس محفوظ مانده است.",
+        )
+
         update_persisted_job(
             job_path,
             status="vision_failed",
