@@ -21,6 +21,145 @@ function sleep(ms) {
 
 let lastCommandId = null;
 
+const VISION_DOWNLOAD_TIMEOUT_MS = 80000;
+const VISION_BUSY_EXPIRE_MS = 120000;
+const VISION_BUSY_STORAGE_KEY = "chatgpt_queue_vision_busy_v1";
+const VISION_RESULT_FILE_NAME = "vision-result.json";
+
+
+function getVisionBusyState() {
+
+    try {
+
+        const raw =
+            localStorage.getItem(
+                VISION_BUSY_STORAGE_KEY
+            );
+
+
+        if (!raw) {
+
+            return {
+                busy: false,
+                commandId: "",
+                startedAt: 0
+            };
+        }
+
+
+        const parsed =
+            JSON.parse(
+                raw
+            );
+
+
+        return {
+            busy:
+                Boolean(
+                    parsed?.busy
+                ),
+
+            commandId:
+                String(
+                    parsed?.commandId
+                    || ""
+                ),
+
+            startedAt:
+                Number(
+                    parsed?.startedAt
+                    || 0
+                )
+        };
+
+    } catch (error) {
+
+        console.warn(
+            "VISION busy state read failed:",
+            error
+        );
+
+
+        return {
+            busy: false,
+            commandId: "",
+            startedAt: 0
+        };
+    }
+}
+
+
+function tryClaimVisionBusy(
+    commandId
+) {
+
+    const now =
+        Date.now();
+
+
+    const state =
+        getVisionBusyState();
+
+
+    if (
+        state.busy
+        &&
+        state.startedAt > 0
+        &&
+        (
+            now -
+            state.startedAt
+        ) <
+        VISION_BUSY_EXPIRE_MS
+    ) {
+
+        return false;
+    }
+
+
+    localStorage.setItem(
+        VISION_BUSY_STORAGE_KEY,
+        JSON.stringify({
+            busy: true,
+            commandId:
+                String(
+                    commandId || ""
+                ),
+            startedAt:
+                now
+        })
+    );
+
+
+    return true;
+}
+
+
+function releaseVisionBusy(
+    commandId
+) {
+
+    const state =
+        getVisionBusyState();
+
+
+    if (
+        !state.busy
+        ||
+        !state.commandId
+        ||
+        state.commandId ===
+        String(
+            commandId || ""
+        )
+    ) {
+
+        localStorage.removeItem(
+            VISION_BUSY_STORAGE_KEY
+        );
+    }
+}
+
 
 // =========================================================
 // BRIDGE
@@ -1689,6 +1828,200 @@ function getLatestAssistantText() {
 
 
 // =========================================================
+// VISION RESULT FILE DOWNLOAD
+// =========================================================
+
+function getVisionResultArtifactLinks() {
+
+    return Array.from(
+        document.querySelectorAll(
+            '[role="link"][aria-label*="vision-result.json"]'
+        )
+    );
+}
+
+
+function waitForVisionDownloadInBackground(
+    timeoutMs
+) {
+
+    return new Promise(
+        (
+            resolve,
+            reject
+        ) => {
+
+            chrome.runtime.sendMessage(
+                {
+                    type:
+                        "waitForVisionDownload",
+
+                    fileName:
+                        VISION_RESULT_FILE_NAME,
+
+                    timeoutMs
+                },
+                response => {
+
+                    if (
+                        chrome.runtime.lastError
+                    ) {
+
+                        reject(
+                            new Error(
+                                chrome.runtime.lastError.message
+                            )
+                        );
+
+                        return;
+                    }
+
+
+                    if (
+                        !response
+                        ||
+                        !response.success
+                    ) {
+
+                        reject(
+                            new Error(
+                                response?.error
+                                ||
+                                "Vision result download watcher failed."
+                            )
+                        );
+
+                        return;
+                    }
+
+
+                    resolve(
+                        response.data
+                    );
+                }
+            );
+        }
+    );
+}
+
+
+async function waitForVisionResultDownload(
+    baselineLinks
+) {
+
+    const startedAt =
+        Date.now();
+
+
+    const baselineSet =
+        new Set(
+            Array.isArray(
+                baselineLinks
+            )
+                ? baselineLinks
+                : []
+        );
+
+
+    while (
+        (
+            Date.now() -
+            startedAt
+        ) <
+        VISION_DOWNLOAD_TIMEOUT_MS
+    ) {
+
+        const links =
+            getVisionResultArtifactLinks();
+
+
+        const link =
+            links.find(
+                candidate =>
+                    !baselineSet.has(
+                        candidate
+                    )
+            );
+
+
+        if (link) {
+
+            const elapsed =
+                Date.now() -
+                startedAt;
+
+
+            const remainingMs =
+                Math.max(
+                    1000,
+                    VISION_DOWNLOAD_TIMEOUT_MS -
+                    elapsed
+                );
+
+
+            console.log(
+                "VISION result artifact detected:",
+                {
+                    ariaLabel:
+                        link.getAttribute(
+                            "aria-label"
+                        ),
+
+                    remainingMs
+                }
+            );
+
+
+            // Arm the Chrome download listener BEFORE clicking so a very fast
+            // download cannot finish before the background worker sees it.
+            const downloadPromise =
+                waitForVisionDownloadInBackground(
+                    remainingMs
+                );
+
+
+            link.click();
+
+
+            const download =
+                await downloadPromise;
+
+
+            if (
+                !download
+                ||
+                !download.fileName
+            ) {
+
+                throw new Error(
+                    "Vision result download completed without a local file path."
+                );
+            }
+
+
+            console.log(
+                "VISION result file downloaded:",
+                download.fileName
+            );
+
+
+            return download.fileName;
+        }
+
+
+        await sleep(
+            500
+        );
+    }
+
+
+    throw new Error(
+        "vision-result.json was not available within 80 seconds."
+    );
+}
+
+
+// =========================================================
 // VISION FINAL JSON REPLY
 // =========================================================
 
@@ -2228,6 +2561,24 @@ async function processCommand(command) {
         command.type === "vision"
     ) {
 
+        const claimed =
+            tryClaimVisionBusy(
+                command.id
+            );
+
+
+        if (!claimed) {
+
+            console.warn(
+                "VISION command ignored because another Vision job is still active:",
+                command.id
+            );
+
+
+            return;
+        }
+
+
         try {
 
             console.log(
@@ -2262,13 +2613,13 @@ async function processCommand(command) {
             );
 
 
-            const assistantBaseline =
-                getAssistantSnapshot();
+            const artifactBaseline =
+                getVisionResultArtifactLinks();
 
 
             console.log(
-                "Assistant baseline before Vision prompt:",
-                assistantBaseline
+                "VISION artifact baseline count:",
+                artifactBaseline.length
             );
 
 
@@ -2277,19 +2628,15 @@ async function processCommand(command) {
             );
 
 
-            const rawReply = "";
-
-
-            const replyText =
-                await getReliableVisionReply(
-                    rawReply,
-                    assistantBaseline
+            const downloadedFilePath =
+                await waitForVisionResultDownload(
+                    artifactBaseline
                 );
 
 
             console.log(
-                "FINAL VISION REPLY:",
-                replyText
+                "FINAL VISION RESULT FILE:",
+                downloadedFilePath
             );
 
 
@@ -2304,8 +2651,8 @@ async function processCommand(command) {
                 success:
                     true,
 
-                text:
-                    replyText
+                filePath:
+                    downloadedFilePath
             });
 
         } catch (error) {
@@ -2330,6 +2677,12 @@ async function processCommand(command) {
                 error:
                     String(error)
             });
+
+        } finally {
+
+            releaseVisionBusy(
+                command.id
+            );
         }
 
 
