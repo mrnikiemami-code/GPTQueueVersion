@@ -1754,7 +1754,7 @@ async function getReliableVisionReply(
     // Vision reply capture is changed.
     // =====================================================
 
-    const timeoutMs = 30000;
+    const timeoutMs = 45000;
     const fallbackPollMs = 750;
 
 
@@ -1910,7 +1910,121 @@ async function getReliableVisionReply(
 
 
         // The assistant turn may still be streaming and contain incomplete
-        // JSON. MutationObserver will call this scanner again as text grows.
+        // JSON. Before returning, use the broader assistant-node snapshot as
+        // a fallback for ChatGPT DOM versions where
+        // data-chatgpt-selection-message-id is absent.
+        const currentNodes =
+            getAssistantMessageNodes();
+
+        const baselineCount =
+            Number(
+                assistantBaseline?.count || 0
+            );
+
+        const baselineNodes =
+            new Set(
+                Array.isArray(
+                    assistantBaseline?.nodes
+                )
+                    ? assistantBaseline.nodes
+                    : []
+            );
+
+        const fallbackCandidates = [];
+
+        // Preferred fallback: conversation order. Any assistant node appended
+        // after the baseline belongs to the current prompt.
+        if (
+            currentNodes.length > baselineCount
+        ) {
+
+            for (
+                let i = baselineCount;
+                i < currentNodes.length;
+                i++
+            ) {
+
+                const text =
+                    getAssistantNodeText(
+                        currentNodes[i]
+                    );
+
+                if (text) {
+                    fallbackCandidates.push({
+                        index: i,
+                        text
+                    });
+                }
+            }
+        }
+
+        // DOM re-render fallback: if ChatGPT replaced node objects instead of
+        // simply appending, inspect only nodes that were not present in the
+        // baseline snapshot.
+        if (
+            fallbackCandidates.length === 0
+        ) {
+
+            for (
+                let i = 0;
+                i < currentNodes.length;
+                i++
+            ) {
+
+                const node =
+                    currentNodes[i];
+
+                if (
+                    baselineNodes.has(
+                        node
+                    )
+                ) {
+                    continue;
+                }
+
+                const text =
+                    getAssistantNodeText(
+                        node
+                    );
+
+                if (text) {
+                    fallbackCandidates.push({
+                        index: i,
+                        text
+                    });
+                }
+            }
+        }
+
+        for (
+            let i =
+                fallbackCandidates.length - 1;
+            i >= 0;
+            i--
+        ) {
+
+            const parsed =
+                parseValidVisionJson(
+                    fallbackCandidates[i].text
+                );
+
+            if (parsed) {
+
+                console.log(
+                    "VALID FINAL VISION JSON FOUND BY ASSISTANT NODE FALLBACK:",
+                    {
+                        source,
+                        index:
+                            fallbackCandidates[i].index,
+                        json:
+                            parsed
+                    }
+                );
+
+                return parsed;
+            }
+        }
+
         return null;
     }
 
@@ -1981,7 +2095,7 @@ async function getReliableVisionReply(
 
                 reject(
                     new Error(
-                        "Vision answer was not captured as a new assistant message within 30 seconds."
+                        "Vision answer was not captured as a new assistant message within 45 seconds."
                     )
                 );
             };
