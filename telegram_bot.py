@@ -4520,7 +4520,10 @@ async def _process_queued_job(application, queue_job):
         return
 
     except json.JSONDecodeError as ex:
-        # Invalid JSON may still be transient, so keep the existing one retry.
+        # Never auto-run Vision a second time for the same persisted image.
+        # A capture/parsing failure is kept for explicit user Retry only.
+        # This prevents a late/ambiguous first result from causing another
+        # ChatGPT request and duplicate image processing.
         await _finish_vision_progress(
             application,
             chat_id,
@@ -4529,42 +4532,24 @@ async def _process_queued_job(application, queue_job):
             "⚠️ فایل نتیجه معتبر نبود؛ عکس محفوظ مانده است.",
         )
 
-        if attempts < 2:
-            update_persisted_job(
-                job_path,
-                status="queued",
-                destination=destination,
-                lastError=str(ex),
-                visionAttempts=attempts,
-            )
-            _db_update_queue_job(
-                job_id,
-                status="queued",
-            )
-            await _safe_bot_send(
-                application.bot,
-                chat_id,
-                "⚠️ پاسخ Vision معتبر نبود؛ عکس محفوظ است و یک بار دیگر تلاش می‌شود.\n"
-                f"Job ID: {job_id}",
-            )
-        else:
-            update_persisted_job(
-                job_path,
-                status="vision_failed",
-                destination=destination,
-                lastError=str(ex),
-                visionAttempts=attempts,
-            )
-            _db_update_queue_job(
-                job_id,
-                status="vision_failed",
-            )
-            await _safe_bot_send(
-                application.bot,
-                chat_id,
-                "⚠️ Vision بعد از دو تلاش پاسخ معتبر نداد. عکس محفوظ مانده است.\n"
-                f"Job ID: {job_id}",
-            )
+        update_persisted_job(
+            job_path,
+            status="vision_failed",
+            destination=destination,
+            lastError=str(ex),
+            visionAttempts=attempts,
+        )
+        _db_update_queue_job(
+            job_id,
+            status="vision_failed",
+        )
+        await _safe_bot_send(
+            application.bot,
+            chat_id,
+            "⚠️ نتیجه Vision قابل پردازش نبود. عکس محفوظ مانده است و خودکار دوباره به ChatGPT ارسال نمی‌شود.\n"
+            f"Job ID: {job_id}\n"
+            "در صورت نیاز از /retry استفاده کن.",
+        )
         _db_mark_batch_done_if_complete(batch_id)
         return
 
