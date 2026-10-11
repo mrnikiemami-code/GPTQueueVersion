@@ -734,10 +734,47 @@ def analyze_image_via_bridge(
             )
         )
 
-    text = result.get(
-        "text",
-        ""
-    )
+    downloaded_file_path = str(
+        result.get(
+            "filePath",
+            ""
+        )
+        or ""
+    ).strip()
+
+    if downloaded_file_path:
+
+        if not os.path.exists(
+            downloaded_file_path
+        ):
+
+            raise RuntimeError(
+                "Downloaded Vision result file was not found: "
+                + downloaded_file_path
+            )
+
+        with open(
+            downloaded_file_path,
+            "r",
+            encoding="utf-8-sig"
+        ) as result_file:
+
+            text = result_file.read()
+
+        print("")
+        print(
+            "VISION RESULT FILE:",
+            downloaded_file_path
+        )
+        print("")
+
+    else:
+
+        # Backward-compatible fallback for older extension versions.
+        text = result.get(
+            "text",
+            ""
+        )
 
     parsed = extract_json_from_text(
         text
