@@ -2700,10 +2700,10 @@ async function processCommand(command) {
                 success:
                     true,
 
+                // normalizeVisionObject already returns serialized JSON.
+                // Do not stringify a second time (Python expects an object after json.loads).
                 text:
-                    JSON.stringify(
-                        visionJson
-                    )
+                    visionJson
             });
 
 
