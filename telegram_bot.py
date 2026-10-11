@@ -1474,8 +1474,8 @@ def send_to_google_sheet_sync(
 
         if (
             return_confirmed_not_found
-            and not_found_checks >= 3
-            and not_found_checks == successful_status_checks
+            and successful_status_checks == attempts
+            and not_found_checks == attempts
         ):
             return {
                 "success": True,
@@ -1498,6 +1498,7 @@ def send_to_google_sheet_sync(
     if status_only:
 
         status_result = poll_saved_result(
+            attempts=1,
             return_confirmed_not_found=True
         )
 
@@ -2744,6 +2745,8 @@ async def retry_job_by_id(update, job_id, application=None):
 
     async with processing_lock:
 
+        result_source = None
+
         # =====================================================
         # A) STATUS-FIRST CHECK
         # =====================================================
@@ -2776,16 +2779,18 @@ async def retry_job_by_id(update, job_id, application=None):
         if status_response.get("requestStatus") == "done":
 
             google_response = status_response
+            result_source = "status"
 
         else:
             # =================================================
             # B) STATUS NOT COMPLETE
             #
             # Safe retry rule:
-            # - If EVERY status check explicitly returned not_found, Google
-            #   has no record for this requestId. Retry exactly one POST with
-            #   the SAME requestId.
-            # - If status checks were unavailable/ambiguous, never POST
+            # - Retry performs ONE status check.
+            # - If that explicit check returns not_found, Google has no record
+            #   for this requestId, so retry exactly one POST with the SAME
+            #   requestId.
+            # - If the status check times out/is unavailable, never POST
             #   blindly because the first request may already have arrived.
             # - sheet_submitted is never re-POSTed.
             # =================================================
@@ -2859,6 +2864,7 @@ async def retry_job_by_id(update, job_id, application=None):
                     False,
                     job.get("destination") or DESTINATION_COURSE
                 )
+                result_source = "retry_post"
 
             except Exception as ex:
 
@@ -2965,12 +2971,20 @@ async def retry_job_by_id(update, job_id, application=None):
                 "-"
             )
 
-            message = (
-                "✅ بررسی شد: این مورد قبلاً در Google Sheet ثبت شده است.\n"
-                "ارسال مجدد انجام نشد.\n\n"
-                f"ردیف: {row}\n"
-                f"Job ID: {job_id}"
-            )
+            if result_source == "retry_post":
+                message = (
+                    "✅ اطلاعات با موفقیت در Google Sheet ثبت شد.\n"
+                    "Retry با همان اطلاعات ذخیره‌شده انجام شد و Vision دوباره اجرا نشد.\n\n"
+                    f"ردیف: {row}\n"
+                    f"Job ID: {job_id}"
+                )
+            else:
+                message = (
+                    "✅ بررسی شد: این مورد قبلاً در Google Sheet ثبت شده بود.\n"
+                    "ارسال مجدد انجام نشد.\n\n"
+                    f"ردیف: {row}\n"
+                    f"Job ID: {job_id}"
+                )
 
         else:
 
