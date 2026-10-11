@@ -21,10 +21,10 @@ function sleep(ms) {
 
 let lastCommandId = null;
 
-const VISION_DOWNLOAD_TIMEOUT_MS = 80000;
+const VISION_ARTIFACT_TIMEOUT_MS = 80000;
 const VISION_BUSY_EXPIRE_MS = 120000;
 const VISION_BUSY_STORAGE_KEY = "chatgpt_queue_vision_busy_v1";
-const VISION_RESULT_FILE_NAME = "vision-result.json";
+const VISION_RESULT_DOCUMENT_NAME = "vision-result.task.md";
 
 
 function getVisionBusyState() {
@@ -1828,85 +1828,186 @@ function getLatestAssistantText() {
 
 
 // =========================================================
-// VISION RESULT FILE DOWNLOAD
+// VISION RESULT DOCUMENT PREVIEW
 // =========================================================
 
-function getVisionResultArtifactLinks() {
+function getVisionResultDocumentButtons() {
 
-    return Array.from(
-        document.querySelectorAll(
-            '[role="link"][aria-label*="vision-result.json"]'
-        )
-    );
-}
-
-
-function waitForVisionDownloadInBackground(
-    timeoutMs
-) {
-
-    return new Promise(
-        (
-            resolve,
-            reject
-        ) => {
-
-            chrome.runtime.sendMessage(
-                {
-                    type:
-                        "waitForVisionDownload",
-
-                    fileName:
-                        VISION_RESULT_FILE_NAME,
-
-                    timeoutMs
-                },
-                response => {
-
-                    if (
-                        chrome.runtime.lastError
-                    ) {
-
-                        reject(
-                            new Error(
-                                chrome.runtime.lastError.message
-                            )
-                        );
-
-                        return;
-                    }
+    const buttons =
+        Array.from(
+            document.querySelectorAll(
+                'button[aria-label]'
+            )
+        );
 
 
-                    if (
-                        !response
-                        ||
-                        !response.success
-                    ) {
+    return buttons.filter(
+        button => {
 
-                        reject(
-                            new Error(
-                                response?.error
-                                ||
-                                "Vision result download watcher failed."
-                            )
-                        );
-
-                        return;
-                    }
+            const label =
+                String(
+                    button.getAttribute(
+                        'aria-label'
+                    )
+                    || ""
+                );
 
 
-                    resolve(
-                        response.data
-                    );
-                }
+            return label.includes(
+                VISION_RESULT_DOCUMENT_NAME
             );
         }
     );
 }
 
 
-async function waitForVisionResultDownload(
-    baselineLinks
+function getOpenVisionPreviewPanel() {
+
+    const panels =
+        Array.from(
+            document.querySelectorAll(
+                '[role="tabpanel"][data-app-shell-tab-panel-controller="right"]'
+            )
+        );
+
+
+    return panels.find(
+        panel => {
+
+            const label =
+                String(
+                    panel.getAttribute(
+                        'aria-label'
+                    )
+                    || ""
+                ).trim();
+
+
+            return (
+                label ===
+                VISION_RESULT_DOCUMENT_NAME
+                ||
+                label.endsWith(
+                    "/" +
+                    VISION_RESULT_DOCUMENT_NAME
+                )
+            );
+        }
+    )
+    || null;
+}
+
+
+function extractOpenVisionPreviewContent() {
+
+    const panel =
+        getOpenVisionPreviewPanel();
+
+
+    if (!panel) {
+        return "";
+    }
+
+
+    const editor =
+        panel.querySelector(
+            '[data-selected-text-overlay-target]'
+        )
+        ||
+        panel.querySelector(
+            '[contenteditable="true"]'
+        );
+
+
+    if (!editor) {
+        return "";
+    }
+
+
+    return String(
+        editor.innerText
+        ||
+        editor.textContent
+        ||
+        ""
+    ).trim();
+}
+
+
+async function waitForVisionPreviewContent(
+    expectedButton
+) {
+
+    const startedAt =
+        Date.now();
+
+
+    while (
+        (
+            Date.now() -
+            startedAt
+        ) <
+        VISION_ARTIFACT_TIMEOUT_MS
+    ) {
+
+        const panel =
+            getOpenVisionPreviewPanel();
+
+
+        if (panel) {
+
+            const content =
+                extractOpenVisionPreviewContent();
+
+
+            if (content) {
+
+                const parsed =
+                    parseValidVisionJson(
+                        content
+                    );
+
+
+                if (parsed) {
+
+                    console.log(
+                        "VALID VISION JSON FOUND IN DOCUMENT PREVIEW:",
+                        parsed
+                    );
+
+
+                    return parsed;
+                }
+            }
+        }
+
+
+        if (
+            expectedButton
+            &&
+            !getOpenVisionPreviewPanel()
+        ) {
+
+            // The proven task-document path opens successfully through the
+            // actual document button's native click handler.
+            expectedButton.click();
+        }
+
+
+        await sleep(
+            250
+        );
+    }
+
+
+    throw new Error(
+        "vision-result.task.md preview was not readable within 80 seconds."
+    );
+}
+
+
+async function waitForVisionResultDocument(
+    baselineButtons
 ) {
 
     const startedAt =
@@ -1916,9 +2017,9 @@ async function waitForVisionResultDownload(
     const baselineSet =
         new Set(
             Array.isArray(
-                baselineLinks
+                baselineButtons
             )
-                ? baselineLinks
+                ? baselineButtons
                 : []
         );
 
@@ -1928,15 +2029,15 @@ async function waitForVisionResultDownload(
             Date.now() -
             startedAt
         ) <
-        VISION_DOWNLOAD_TIMEOUT_MS
+        VISION_ARTIFACT_TIMEOUT_MS
     ) {
 
-        const links =
-            getVisionResultArtifactLinks();
+        const buttons =
+            getVisionResultDocumentButtons();
 
 
-        const link =
-            links.find(
+        const button =
+            buttons.find(
                 candidate =>
                     !baselineSet.has(
                         candidate
@@ -1944,68 +2045,25 @@ async function waitForVisionResultDownload(
             );
 
 
-        if (link) {
-
-            const elapsed =
-                Date.now() -
-                startedAt;
-
-
-            const remainingMs =
-                Math.max(
-                    1000,
-                    VISION_DOWNLOAD_TIMEOUT_MS -
-                    elapsed
-                );
-
+        if (button) {
 
             console.log(
-                "VISION result artifact detected:",
+                "VISION document artifact detected:",
                 {
                     ariaLabel:
-                        link.getAttribute(
+                        button.getAttribute(
                             "aria-label"
-                        ),
-
-                    remainingMs
+                        )
                 }
             );
 
 
-            // Arm the Chrome download listener BEFORE clicking so a very fast
-            // download cannot finish before the background worker sees it.
-            const downloadPromise =
-                waitForVisionDownloadInBackground(
-                    remainingMs
-                );
+            button.click();
 
 
-            link.click();
-
-
-            const download =
-                await downloadPromise;
-
-
-            if (
-                !download
-                ||
-                !download.fileName
-            ) {
-
-                throw new Error(
-                    "Vision result download completed without a local file path."
-                );
-            }
-
-
-            console.log(
-                "VISION result file downloaded:",
-                download.fileName
+            return await waitForVisionPreviewContent(
+                button
             );
-
-
-            return download.fileName;
         }
 
 
@@ -2016,8 +2074,49 @@ async function waitForVisionResultDownload(
 
 
     throw new Error(
-        "vision-result.json was not available within 80 seconds."
+        "vision-result.task.md document was not available within 80 seconds."
     );
+}
+
+
+async function closeVisionPreview() {
+
+    const closeButton =
+        document.querySelector(
+            'button[aria-label="Close viewer"]'
+        )
+        ||
+        document.querySelector(
+            'button[data-testid="close-button"]'
+        );
+
+
+    if (!closeButton) {
+        return;
+    }
+
+
+    closeButton.click();
+
+
+    for (
+        let i = 0;
+        i < 20;
+        i++
+    ) {
+
+        if (
+            !getOpenVisionPreviewPanel()
+        ) {
+
+            return;
+        }
+
+
+        await sleep(
+            100
+        );
+    }
 }
 
 
@@ -2613,13 +2712,13 @@ async function processCommand(command) {
             );
 
 
-            const artifactBaseline =
-                getVisionResultArtifactLinks();
+            const documentBaseline =
+                getVisionResultDocumentButtons();
 
 
             console.log(
-                "VISION artifact baseline count:",
-                artifactBaseline.length
+                "VISION document baseline count:",
+                documentBaseline.length
             );
 
 
@@ -2628,15 +2727,15 @@ async function processCommand(command) {
             );
 
 
-            const downloadedFilePath =
-                await waitForVisionResultDownload(
-                    artifactBaseline
+            const visionJson =
+                await waitForVisionResultDocument(
+                    documentBaseline
                 );
 
 
             console.log(
-                "FINAL VISION RESULT FILE:",
-                downloadedFilePath
+                "FINAL VISION DOCUMENT JSON:",
+                visionJson
             );
 
 
@@ -2651,11 +2750,18 @@ async function processCommand(command) {
                 success:
                     true,
 
-                filePath:
-                    downloadedFilePath
+                text:
+                    JSON.stringify(
+                        visionJson
+                    )
             });
 
+
+            await closeVisionPreview();
+
         } catch (error) {
+
+            await closeVisionPreview();
 
             console.error(
                 "VISION ERROR:",
