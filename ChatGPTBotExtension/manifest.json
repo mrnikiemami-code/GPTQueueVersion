@@ -5,8 +5,7 @@
   "description": "ChatGPT Telegram Bot Bridge",
   "permissions": [
     "tabs",
-    "scripting",
-    "downloads"
+    "scripting"
   ],
   "host_permissions": [
     "https://chatgpt.com/*",
