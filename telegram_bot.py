@@ -1414,10 +1414,13 @@ def send_to_google_sheet_sync(
 
     def poll_saved_result(
         attempts=GOOGLE_STATUS_POLL_ATTEMPTS,
-        delay_seconds=GOOGLE_STATUS_POLL_DELAY_SECONDS
+        delay_seconds=GOOGLE_STATUS_POLL_DELAY_SECONDS,
+        return_confirmed_not_found=False,
     ):
 
         last_status = None
+        successful_status_checks = 0
+        not_found_checks = 0
 
         if GOOGLE_STATUS_INITIAL_DELAY_SECONDS > 0:
             time.sleep(
@@ -1438,6 +1441,8 @@ def send_to_google_sheet_sync(
 
             if isinstance(last_status, dict):
 
+                successful_status_checks += 1
+
                 if last_status.get("requestStatus") == "done":
                     return last_status
 
@@ -1451,7 +1456,7 @@ def send_to_google_sheet_sync(
                     last_status.get("found") is False
                     and last_status.get("status") == "not_found"
                 ):
-                    pass
+                    not_found_checks += 1
 
                 elif (
                     "success" in last_status
@@ -1467,6 +1472,19 @@ def send_to_google_sheet_sync(
                     delay_seconds
                 )
 
+        if (
+            return_confirmed_not_found
+            and successful_status_checks == attempts
+            and not_found_checks == attempts
+        ):
+            return {
+                "success": True,
+                "found": False,
+                "status": "not_found",
+                "requestStatus": "not_found_confirmed",
+                "checks": attempts,
+            }
+
         return None
 
     # =========================================================
@@ -1478,7 +1496,9 @@ def send_to_google_sheet_sync(
 
     if status_only:
 
-        status_result = poll_saved_result()
+        status_result = poll_saved_result(
+            return_confirmed_not_found=True
+        )
 
         if status_result is not None:
             status_result["requestId"] = request_id
@@ -2758,25 +2778,37 @@ async def retry_job_by_id(update, job_id, application=None):
 
         else:
             # =================================================
-            # B) STILL UNCONFIRMED
+            # B) STATUS NOT COMPLETE
             #
-            # Safety rule:
-            # - sheet_pending / sheet_unconfirmed may already have reached
-            #   Apps Script, so DO NOT blindly POST them again.
-            # - only states that never had a confirmed submission path are
-            #   eligible for a new POST.
+            # Safe retry rule:
+            # - If EVERY status check explicitly returned not_found, Google
+            #   has no record for this requestId. Retry exactly one POST with
+            #   the SAME requestId.
+            # - If status checks were unavailable/ambiguous, never POST
+            #   blindly because the first request may already have arrived.
+            # - sheet_submitted is never re-POSTed.
             # =================================================
 
-            if current_status in (
-                "sheet_pending",
-                "sheet_unconfirmed",
-                "sheet_submitted",
+            confirmed_not_found = (
+                status_response.get("requestStatus")
+                == "not_found_confirmed"
+            )
+
+            if (
+                current_status == "sheet_submitted"
+                or (
+                    current_status in (
+                        "sheet_pending",
+                        "sheet_unconfirmed",
+                    )
+                    and not confirmed_not_found
+                )
             ):
                 update_persisted_job(
                     job_path,
                     status="sheet_unconfirmed",
                     requestId=request_id,
-                    lastError="Status endpoint still unavailable."
+                    lastError="Status endpoint still unavailable or ambiguous."
                 )
                 _db_update_queue_job(
                     job_id,
@@ -2804,13 +2836,18 @@ async def retry_job_by_id(update, job_id, application=None):
 
                 return
 
-            # Only genuinely unsent/failed states reach this POST.
+            # Confirmed not_found, or a state that is safe to submit:
+            # POST exactly once using the original requestId.
             try:
                 update_persisted_job(
                     job_path,
                     status="sheet_pending",
                     requestId=request_id,
                     lastError=None
+                )
+                _db_update_queue_job(
+                    job_id,
+                    status="sheet_pending",
                 )
 
                 google_response = await asyncio.to_thread(
