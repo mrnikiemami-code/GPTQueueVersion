@@ -1982,18 +1982,9 @@ async function waitForVisionPreviewContent(
         }
 
 
-        if (
-            expectedButton
-            &&
-            !getOpenVisionPreviewPanel()
-        ) {
-
-            // The proven task-document path opens successfully through the
-            // actual document button's native click handler.
-            expectedButton.click();
-        }
-
-
+        // The document button is clicked exactly once by
+        // waitForVisionResultDocument(). Re-clicking while the preview is
+        // opening can toggle/fight the viewer and must not happen.
         await sleep(
             250
         );
