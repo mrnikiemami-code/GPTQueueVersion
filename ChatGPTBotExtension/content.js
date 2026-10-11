@@ -1899,101 +1899,64 @@ function getOpenVisionPreviewPanel() {
 
 
 function extractOpenVisionPreviewContent() {
-
-    const panel =
-        getOpenVisionPreviewPanel();
-
-
-    if (!panel) {
-        return "";
-    }
-
-
-    const editor =
-        panel.querySelector(
-            '[data-selected-text-overlay-target]'
-        )
-        ||
-        panel.querySelector(
-            '[contenteditable="true"]'
-        );
-
-
-    if (!editor) {
-        return "";
-    }
-
-
-    return String(
-        editor.innerText
-        ||
-        editor.textContent
-        ||
-        ""
-    ).trim();
+    const panel = getOpenVisionPreviewPanel();
+    if (!panel) return "";
+    const node = panel.querySelector('[data-selected-text-overlay-target]') ||
+                 panel.querySelector('[contenteditable="true"]');
+    return node ? String(node.innerText || node.textContent || "").trim() : "";
 }
 
+// Capture only nodes appearing after the current document was opened.
+// Previous document/chat JSON must never be mistaken for this response.
+function snapshotVisionOverlayNodes() {
+    return new Set(document.querySelectorAll('div[data-selected-text-overlay-target]'));
+}
 
-async function waitForVisionPreviewContent(
-    expectedButton
-) {
+async function waitForVisionPreviewContent(expectedButton, baselineOverlays) {
+    const startedAt = Date.now();
+    let lastLog = -5000;
+    const before = baselineOverlays || new Set();
 
-    const startedAt =
-        Date.now();
-
-
-    while (
-        (
-            Date.now() -
-            startedAt
-        ) <
-        VISION_ARTIFACT_TIMEOUT_MS
-    ) {
-
-        const panel =
-            getOpenVisionPreviewPanel();
-
-
+    while (Date.now() - startedAt < VISION_ARTIFACT_TIMEOUT_MS) {
+        const panel = getOpenVisionPreviewPanel();
         if (panel) {
-
-            const content =
-                extractOpenVisionPreviewContent();
-
-
-            if (content) {
-
-                const parsed =
-                    parseValidVisionJson(
-                        content
-                    );
-
-
-                if (parsed) {
-
-                    console.log(
-                        "VALID VISION JSON FOUND IN DOCUMENT PREVIEW:",
-                        parsed
-                    );
-
-
-                    return parsed;
-                }
+            const parsed = parseValidVisionJson(extractOpenVisionPreviewContent());
+            if (parsed) {
+                console.log("VISION_PREVIEW_CAPTURE", {source: "named-panel", elapsedMs: Date.now()-startedAt});
+                return parsed;
             }
         }
 
+        // Supported new preview markup:
+        // div[data-selected-text-overlay-target].MarkdownRoot-... > p containing JSON
+        const overlays = Array.from(document.querySelectorAll('div[data-selected-text-overlay-target]'));
+        for (const node of overlays) {
+            if (before.has(node) || !node.getClientRects().length) continue;
+            if (!Array.from(node.classList).some(c => c.startsWith("MarkdownRoot"))) continue;
+            const parsed = parseValidVisionJson(String(node.innerText || node.textContent || "").trim());
+            if (parsed) {
+                console.log("VISION_PREVIEW_CAPTURE", {
+                    source: "new-markdown-overlay",
+                    elapsedMs: Date.now()-startedAt,
+                    overlayCount: overlays.length
+                });
+                return parsed;
+            }
+        }
 
-        // The document button is clicked exactly once by
-        // waitForVisionResultDocument(). Re-clicking while the preview is
-        // opening can toggle/fight the viewer and must not happen.
-        await sleep(
-            250
-        );
+        if (Date.now()-startedAt-lastLog >= 5000) {
+            lastLog = Date.now()-startedAt;
+            console.log("VISION_PREVIEW_WAIT", {
+                elapsedMs: lastLog, namedPanelFound: Boolean(panel),
+                overlayCount: overlays.length,
+                newOverlayCount: overlays.filter(n => !before.has(n)).length,
+                documentButtonPresent: Boolean(expectedButton && expectedButton.isConnected)
+            });
+        }
+        // Do not click the file a second time: that can close the viewer.
+        await sleep(250);
     }
-
-
-    throw new Error(
-        "vision-result.task.md preview was not readable within 80 seconds."
-    );
+    throw new Error("VISION_PREVIEW_TIMEOUT: no valid current-document JSON found");
 }
 
 
@@ -2047,14 +2010,10 @@ async function waitForVisionResultDocument(
                         )
                 }
             );
-
-
+            const overlayBaseline = snapshotVisionOverlayNodes();
+            console.log("VISION_PREVIEW_OPEN", { baselineOverlayCount: overlayBaseline.size });
             button.click();
-
-
-            return await waitForVisionPreviewContent(
-                button
-            );
+            return await waitForVisionPreviewContent(button, overlayBaseline);
         }
 
 
@@ -2747,6 +2706,8 @@ async function processCommand(command) {
                     )
             });
 
+
+            console.log("VISION_RESULT_DELIVERED", { commandId: command.id });
 
             await closeVisionPreview();
 
