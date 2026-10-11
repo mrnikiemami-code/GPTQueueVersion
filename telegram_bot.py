@@ -113,20 +113,20 @@ GOOGLE_POST_CONNECT_TIMEOUT_SECONDS = 5
 
 # حداکثر زمان انتظار برای پاسخ POST بعد از اتصال
 # طبق تصمیم فعلی: 15 ثانیه
-GOOGLE_POST_READ_TIMEOUT_SECONDS = 15
+GOOGLE_POST_READ_TIMEOUT_SECONDS = 30
 
 # timeout بررسی وضعیت requestId
 GOOGLE_STATUS_CONNECT_TIMEOUT_SECONDS = 4
 GOOGLE_STATUS_READ_TIMEOUT_SECONDS = 8
 
 # چند بار وضعیت requestId بررسی شود
-GOOGLE_STATUS_POLL_ATTEMPTS = 3
+GOOGLE_STATUS_POLL_ATTEMPTS = 6
 
 # کمی صبر قبل از اولین status check
-GOOGLE_STATUS_INITIAL_DELAY_SECONDS = 0.75
+GOOGLE_STATUS_INITIAL_DELAY_SECONDS = 1.5
 
 # فاصله بین بررسی‌های وضعیت
-GOOGLE_STATUS_POLL_DELAY_SECONDS = 1.0
+GOOGLE_STATUS_POLL_DELAY_SECONDS = 2.0
 
 # Retry خودکار POST غیرفعال است.
 # اگر ثبت تأیید نشد، Job محفوظ می‌ماند و کاربر با /retry دوباره تلاش می‌کند.
@@ -1492,6 +1492,7 @@ def send_to_google_sheet_sync(
         }
 
     post_redirect_received = False
+    post_outcome_unknown = False
 
     # =========================================================
     # 9) POST ONCE
@@ -1503,6 +1504,7 @@ def send_to_google_sheet_sync(
 
     def post_once():
         nonlocal post_redirect_received
+        nonlocal post_outcome_unknown
 
         try:
             response = requests.post(
@@ -1565,16 +1567,18 @@ def send_to_google_sheet_sync(
             return None
 
         except requests.Timeout as ex:
+            post_outcome_unknown = True
             print("")
-            print("GOOGLE POST TIMEOUT - CHECKING REQUEST STATUS")
+            print("GOOGLE POST TIMEOUT - DELIVERY OUTCOME UNKNOWN")
             print("REQUEST ID:", request_id)
             print("ERROR:", str(ex))
             print("")
             return None
 
         except requests.RequestException as ex:
+            post_outcome_unknown = True
             print("")
-            print("GOOGLE POST NETWORK ERROR - CHECKING REQUEST STATUS")
+            print("GOOGLE POST NETWORK ERROR - DELIVERY OUTCOME UNKNOWN")
             print("REQUEST ID:", request_id)
             print("ERROR:", str(ex))
             print("")
@@ -1636,9 +1640,22 @@ def send_to_google_sheet_sync(
                 ),
             }
 
+        if post_outcome_unknown:
+            return {
+                "success": False,
+                "submitted": False,
+                "requestId": request_id,
+                "requestStatus": "delivery_unknown",
+                "message": (
+                    "The POST timed out or had a network error before its "
+                    "delivery result could be known. The request may still "
+                    "have reached Google Apps Script."
+                ),
+            }
+
         raise RuntimeError(
-            "Google Sheet request could not be confirmed and no "
-            "Apps Script redirect was received. "
+            "Google Sheet request failed before any accepted or ambiguous "
+            "delivery state was observed. "
             f"requestId={request_id}. "
             "Vision data is safely stored locally."
         )
@@ -4387,7 +4404,32 @@ async def _process_queued_job(application, queue_job):
     print(json.dumps(google_response, ensure_ascii=False, indent=2))
     print("")
 
-    if google_response.get("requestStatus") == "submitted_unconfirmed":
+    if google_response.get("requestStatus") == "delivery_unknown":
+        update_persisted_job(
+            job_path,
+            status="sheet_unconfirmed",
+            destination=destination,
+            requestId=request_id,
+            googleResponse=google_response,
+            lastError=google_response.get("message"),
+        )
+        _db_update_queue_job(
+            job_id,
+            status="sheet_unconfirmed",
+        )
+
+        await _safe_bot_send(
+            application.bot,
+            chat_id,
+            "⚠️ اطلاعات استخراج شد و برای Google ارسال شد، "
+            "اما به دلیل کندی یا قطع ارتباط، مشخص نیست درخواست به Google رسیده یا نه.\n\n"
+            "ممکن است اطلاعات در شیت ثبت شده باشد.\n"
+            "برای جلوگیری از ثبت تکراری، ارسال مجدد خودکار انجام نمی‌شود.\n\n"
+            f"Job ID: {job_id}\n"
+            "برای بررسی وضعیت، /retry را بزن.",
+        )
+
+    elif google_response.get("requestStatus") == "submitted_unconfirmed":
         update_persisted_job(
             job_path,
             status="sheet_submitted",
