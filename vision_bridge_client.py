@@ -21,9 +21,9 @@ BRIDGE_URL = "http://127.0.0.1:8767"
 BRIDGE_CONNECT_TIMEOUT_SECONDS = 5
 BRIDGE_REQUEST_READ_TIMEOUT_SECONDS = 30
 
-# Extension waits up to 80s for the downloadable result. Keep the Bridge
-# client slightly above that, but below the Telegram worker's 90s hard limit,
-# so no background polling thread survives after the worker moves on.
+# Extension waits up to 80s for the Vision document artifact/preview.
+# Keep the Bridge client slightly above that, but below the Telegram worker's
+# 90s hard limit so no background polling thread survives after the worker moves on.
 VISION_RESULT_TIMEOUT_SECONDS = 85
 VISION_RESULT_POLL_INTERVAL_SECONDS = 2
 
@@ -189,16 +189,16 @@ VISION_PROMPT = (
 
     'قانون خروجی نهایی: '
     'خروجی را به صورت متن معمولی داخل پیام چت برنگردان. '
-    'به جای آن، یک فایل واقعی قابل دانلود با نام دقیق vision-result.json ایجاد کن. '
-    'محتوای فایل vision-result.json باید فقط و فقط یک JSON معتبر باشد. '
-    'فایل باید دقیقاً همین 8 کلید را داشته باشد و هیچ کلید دیگری اضافه نشود: '
+    'به جای آن یک Document artifact واقعی با نام دقیق vision-result.task.md ایجاد کن. '
+    'این Document باید در رابط ChatGPT به صورت کارت Document قابل باز شدن نمایش داده شود، نه صرفاً لینک دانلود. '
+    'محتوای vision-result.task.md باید فقط و فقط یک JSON معتبر باشد. '
+    'Document باید دقیقاً همین 8 کلید را داشته باشد و هیچ کلید دیگری اضافه نشود: '
     'instagramId، fullName، phoneNumber، job، employeeCount، city، challenge، description. '
     'مقدار هر کلید باید string باشد. '
-    'داخل فایل هیچ Markdown، code fence، توضیح، عنوان، کامنت یا متن اضافه قرار نده. '
-    'قبل و بعد از JSON نیز هیچ متن دیگری داخل فایل نباشد. '
-    'فایل را به عنوان attachment قابل دانلود در پاسخ ارائه کن. '
-    'در متن پاسخ چت نیز JSON را تکرار نکن. '
-    'هدف این است که نتیجه نهایی فقط از طریق فایل vision-result.json قابل دریافت باشد.'
+    'داخل Document هیچ Markdown، code fence، heading، توضیح، عنوان، کامنت یا متن اضافه قرار نده. '
+    'قبل و بعد از JSON نیز هیچ متن دیگری داخل Document نباشد. '
+    'در متن معمولی پاسخ نیز JSON را تکرار نکن. '
+    'هدف این است که نتیجه نهایی فقط داخل Document با نام vision-result.task.md قرار بگیرد تا از Preview خود ChatGPT خوانده شود.'
 )
 
 # =========================================================
@@ -737,47 +737,10 @@ def analyze_image_via_bridge(
             )
         )
 
-    downloaded_file_path = str(
-        result.get(
-            "filePath",
-            ""
-        )
-        or ""
-    ).strip()
-
-    if downloaded_file_path:
-
-        if not os.path.exists(
-            downloaded_file_path
-        ):
-
-            raise RuntimeError(
-                "Downloaded Vision result file was not found: "
-                + downloaded_file_path
-            )
-
-        with open(
-            downloaded_file_path,
-            "r",
-            encoding="utf-8-sig"
-        ) as result_file:
-
-            text = result_file.read()
-
-        print("")
-        print(
-            "VISION RESULT FILE:",
-            downloaded_file_path
-        )
-        print("")
-
-    else:
-
-        # Backward-compatible fallback for older extension versions.
-        text = result.get(
-            "text",
-            ""
-        )
+    text = result.get(
+        "text",
+        ""
+    )
 
     parsed = extract_json_from_text(
         text
