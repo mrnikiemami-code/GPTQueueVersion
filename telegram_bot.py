@@ -3299,17 +3299,6 @@ async def retry_delete_callback(
         job
     )
 
-    # Safety guard for old/stale Telegram messages:
-    # a legacy "retrydeleteconfirm" button must never silently delete hidden
-    # duplicates that were not explicitly shown to the operator.
-    if len(retry_group) > 1:
-        await query.answer(
-            "این مورد چند Job تکراری دارد؛ از /retry لیست جدید را باز کن و حذف گروهی را تأیید کن.",
-            show_alert=True
-        )
-        return
-
-
     target_ids = []
 
     for grouped_job in retry_group:
