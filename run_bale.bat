@@ -16,6 +16,9 @@ if "%BALE_ALLOWED_USER_IDS%"=="" (
  exit /b 1
 )
 set "GPTQUEUE_MESSENGER=bale"
+rem Set GPTQUEUE_GOOGLE_TRANSPORT=python in bale.local.cmd for the original direct route.
+if "%GPTQUEUE_GOOGLE_TRANSPORT%"=="" set "GPTQUEUE_GOOGLE_TRANSPORT=dotnet"
+echo Google transport: %GPTQUEUE_GOOGLE_TRANSPORT%
 set "CHROME=C:\Program Files\Google\Chrome\Application\chrome.exe"
 if not exist "%CHROME%" set "CHROME=C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
 set "PROFILE=%ROOT%\ChromeBotProfile"
