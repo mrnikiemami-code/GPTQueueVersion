@@ -57,8 +57,13 @@ if ctypes.windll.kernel32.GetLastError() == 183:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
-JOBS_DIR = os.path.join(BASE_DIR, "jobs")
-DATA_DIR = os.path.join(BASE_DIR, "data")
+# Bale mode isolates its local jobs and queue from historical Telegram data.
+MESSENGER_MODE = os.environ.get("GPTQUEUE_MESSENGER", "telegram").strip().lower()
+if MESSENGER_MODE not in ("telegram", "bale"):
+    raise ValueError("GPTQUEUE_MESSENGER must be telegram or bale")
+STATE_ROOT = os.path.join(BASE_DIR, "bale") if MESSENGER_MODE == "bale" else BASE_DIR
+JOBS_DIR = os.path.join(STATE_ROOT, "jobs")
+DATA_DIR = os.path.join(STATE_ROOT, "data")
 QUEUE_DB_PATH = os.path.join(DATA_DIR, "queue.db")
 os.makedirs(JOBS_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -98,7 +103,12 @@ def save_config():
 
 config = load_config()
 
-BOT_TOKEN = config.get("telegramBotTokenQueue") or config["telegramBotToken"]
+if MESSENGER_MODE == "bale":
+    BOT_TOKEN = os.environ.get("BALE_BOT_TOKEN", "").strip()
+    if not BOT_TOKEN:
+        raise ValueError("BALE_BOT_TOKEN is required for Bale mode.")
+else:
+    BOT_TOKEN = config.get("telegramBotTokenQueue") or config["telegramBotToken"]
 
 
 # =========================================================
@@ -185,9 +195,15 @@ TELEGRAM_DROP_PENDING_UPDATES = False
 #
 
 ALLOWED_USER_IDS = {
-     833081449,   
+     833081449,
      154892792
 }
+if MESSENGER_MODE == "bale":
+    # Bale IDs are independent of Telegram IDs; fail closed on invalid input.
+    raw_ids = os.environ.get("BALE_ALLOWED_USER_IDS", "").strip()
+    if not raw_ids:
+        raise ValueError("BALE_ALLOWED_USER_IDS is required for Bale mode")
+    ALLOWED_USER_IDS = {int(value.strip()) for value in raw_ids.split(",") if value.strip()}
 
 
 def get_telegram_user_id(update: Update):
@@ -5134,7 +5150,8 @@ def main():
         f"drop_pending={TELEGRAM_DROP_PENDING_UPDATES}"
     )
     print("")
-    print("Waiting for Telegram...")
+    print("Messenger:", MESSENGER_MODE)
+    print("Waiting for", "Bale" if MESSENGER_MODE == "bale" else "Telegram", "...")
     print("")
 
 
@@ -5167,9 +5184,16 @@ def main():
         http_version="1.1",
     )
 
+    app_builder = ApplicationBuilder().token(BOT_TOKEN)
+    if MESSENGER_MODE == "bale":
+        # Only transport changes: preserve all existing handlers and queue logic.
+        app_builder = (
+            app_builder
+            .base_url("http://127.0.0.1:8768/bot")
+            .base_file_url("http://127.0.0.1:8768/file/bot")
+        )
     app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
+        app_builder
         .request(telegram_request)
         .get_updates_request(telegram_get_updates_request)
         .post_init(post_init)
