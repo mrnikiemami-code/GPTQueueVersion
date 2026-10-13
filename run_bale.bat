@@ -6,7 +6,7 @@ set "PYTHON=%ROOT%\.venv\Scripts\python.exe"
 if not exist "%PYTHON%" set "PYTHON=python"
 rem Optional machine-local settings (ignored by Git via *.secret).
 rem Never commit credentials to this public repository.
-if exist "%ROOT%\bale.local.secret" call "%ROOT%\bale.local.secret"
+if exist "%ROOT%\bale.local.cmd" call "%ROOT%\bale.local.cmd"
 if "%BALE_BOT_TOKEN%"=="" (
  echo ERROR: Set BALE_BOT_TOKEN before starting.
  exit /b 1
