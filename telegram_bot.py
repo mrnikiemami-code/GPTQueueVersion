@@ -1338,6 +1338,20 @@ def send_to_google_sheet_sync(
             f"Current URL: {google_url}"
         )
 
+    google_via_dotnet = (
+        MESSENGER_MODE == "bale"
+        and os.environ.get("GPTQUEUE_GOOGLE_TRANSPORT", "").lower() == "dotnet"
+    )
+    if google_via_dotnet:
+        from urllib.parse import quote
+        # Preserve the original Google destination and requestId. Only
+        # relocate the HTTP transport to the already-running loopback C# API.
+        google_url = (
+            "http://127.0.0.1:8768/google/forward?target="
+            + quote(google_url, safe="")
+        )
+        print("GOOGLE TRANSPORT: .NET local relay")
+
     # =========================================================
     # 5) BODY + HEADERS
     # =========================================================
@@ -1382,7 +1396,7 @@ def send_to_google_sheet_sync(
             },
             timeout=(
                 GOOGLE_STATUS_CONNECT_TIMEOUT_SECONDS,
-                GOOGLE_STATUS_READ_TIMEOUT_SECONDS,
+                75 if google_via_dotnet else GOOGLE_STATUS_READ_TIMEOUT_SECONDS,
             ),
             allow_redirects=True,
         )
@@ -1556,7 +1570,7 @@ def send_to_google_sheet_sync(
                 headers=headers,
                 timeout=(
                     GOOGLE_POST_CONNECT_TIMEOUT_SECONDS,
-                    GOOGLE_POST_READ_TIMEOUT_SECONDS,
+                    75 if google_via_dotnet else GOOGLE_POST_READ_TIMEOUT_SECONDS,
                 ),
                 allow_redirects=False,
             )
