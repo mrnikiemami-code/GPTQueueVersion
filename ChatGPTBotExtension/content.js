@@ -1962,8 +1962,27 @@ async function waitForVisionPreviewContent(expectedButton, baselineOverlays, att
 }
 
 
+function findVisionDomReply(attemptId, baselineIds) {
+    const start = "VISION_RESULT_START:" + attemptId;
+    const end = "VISION_RESULT_END:" + attemptId;
+    for (const turn of document.querySelectorAll('[data-chatgpt-search-message-ids]')) {
+        if (!turn.querySelector('[data-conversation-role="assistant"]')) continue;
+        const messageId = turn.querySelector('[data-chatgpt-selection-message-id]')?.getAttribute('data-chatgpt-selection-message-id');
+        if (!messageId || baselineIds.has(messageId)) continue;
+        const node = turn.querySelector('[data-markdown-text-style="assistant-message"]');
+        const text = node ? String(node.innerText || node.textContent || "") : "";
+        const a = text.indexOf(start), b = text.indexOf(end, a + start.length);
+        if (a < 0 || b < 0) continue;
+        const body = text.slice(a + start.length, b).trim();
+        if (!body.startsWith("{") || !body.endsWith("}")) continue;
+        const json = parseValidVisionJson(body);
+        if (json) return { json, messageId, body };
+    }
+    return null;
+}
+
 async function waitForVisionResultDocument(
-    baselineButtons, expectedName, attemptId
+    baselineButtons, expectedName, attemptId, baselineIds
 ) {
 
     const startedAt =
@@ -1987,6 +2006,12 @@ async function waitForVisionResultDocument(
         ) <
         VISION_ARTIFACT_TIMEOUT_MS
     ) {
+
+        const result = findVisionDomReply(attemptId, baselineIds);
+        if (result) {
+            console.log("VISION_DOM_CAPTURE", {attemptId, messageId: result.messageId});
+            return result.json;
+        }
 
         const buttons =
             getVisionResultDocumentButtons(expectedName);
@@ -2669,6 +2694,7 @@ async function processCommand(command) {
                 || expectedName !== "vision-result-" + command.id + ".task.md") {
                 throw new Error("VISION_ATTEMPT_ID_MISSING_OR_INVALID");
             }
+            const baselineIds = new Set(getAssistantSnapshot().assistantMessageIds);
             const documentBaseline =
                 getVisionResultDocumentButtons(expectedName);
 
@@ -2686,7 +2712,7 @@ async function processCommand(command) {
 
             const visionJson =
                 await waitForVisionResultDocument(
-                    documentBaseline, expectedName, command.id
+                    documentBaseline, expectedName, command.id, baselineIds
                 );
 
 
