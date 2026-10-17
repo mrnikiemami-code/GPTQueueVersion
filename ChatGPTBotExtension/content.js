@@ -1861,7 +1861,7 @@ function getVisionResultDocumentButtons(expectedName = VISION_RESULT_DOCUMENT_NA
 }
 
 
-function getOpenVisionPreviewPanel() {
+function getOpenVisionPreviewPanel(expectedName = VISION_RESULT_DOCUMENT_NAME) {
 
     const panels =
         Array.from(
@@ -1885,11 +1885,11 @@ function getOpenVisionPreviewPanel() {
 
             return (
                 label ===
-                VISION_RESULT_DOCUMENT_NAME
+                expectedName
                 ||
                 label.endsWith(
                     "/" +
-                    VISION_RESULT_DOCUMENT_NAME
+                    expectedName
                 )
             );
         }
@@ -1898,8 +1898,8 @@ function getOpenVisionPreviewPanel() {
 }
 
 
-function extractOpenVisionPreviewContent() {
-    const panel = getOpenVisionPreviewPanel();
+function extractOpenVisionPreviewContent(expectedName = VISION_RESULT_DOCUMENT_NAME) {
+    const panel = getOpenVisionPreviewPanel(expectedName);
     if (!panel) return "";
     const node = panel.querySelector('[data-selected-text-overlay-target]') ||
                  panel.querySelector('[contenteditable="true"]');
@@ -1918,10 +1918,12 @@ async function waitForVisionPreviewContent(expectedButton, baselineOverlays, att
     const before = baselineOverlays || new Set();
 
     while (Date.now() - startedAt < VISION_ARTIFACT_TIMEOUT_MS) {
-        const panel = getOpenVisionPreviewPanel();
+        const expectedName = "vision-result-" + attemptId + ".task.md";
+        const panel = getOpenVisionPreviewPanel(expectedName);
         if (panel) {
-            const parsed = parseValidVisionJson(extractOpenVisionPreviewContent());
-            if (parsed && extractOpenVisionPreviewContent().includes("ATTEMPT_ID:" + attemptId)) {
+            const content = extractOpenVisionPreviewContent(expectedName);
+            const parsed = parseValidVisionJson(content);
+            if (parsed && content.includes("ATTEMPT_ID:" + attemptId)) {
                 console.log("VISION_PREVIEW_CAPTURE", {source: "named-panel", elapsedMs: Date.now()-startedAt});
                 return parsed;
             }
