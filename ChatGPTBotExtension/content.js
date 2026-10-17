@@ -1989,6 +1989,9 @@ async function waitForVisionResultDocument(
         Date.now();
 
 
+    let domCandidate = null;
+    let domCandidateAt = 0;
+
     const baselineSet =
         new Set(
             Array.isArray(
@@ -2009,8 +2012,19 @@ async function waitForVisionResultDocument(
 
         const result = findVisionDomReply(attemptId, baselineIds);
         if (result) {
-            console.log("VISION_DOM_CAPTURE", {attemptId, messageId: result.messageId});
-            return result.json;
+            if (domCandidate?.messageId === result.messageId &&
+                domCandidate?.body === result.body &&
+                Date.now() - domCandidateAt >= 1000) {
+                console.log("VISION_DOM_CAPTURE", {attemptId, messageId: result.messageId});
+                return result.json;
+            }
+            if (domCandidate?.messageId !== result.messageId ||
+                domCandidate?.body !== result.body) {
+                domCandidate = result;
+                domCandidateAt = Date.now();
+            }
+        } else {
+            domCandidate = null;
         }
 
         const buttons =
@@ -2026,7 +2040,7 @@ async function waitForVisionResultDocument(
             );
 
 
-        if (button) {
+        if (button && Date.now() - startedAt >= 30000) {
 
             console.log(
                 "VISION document artifact detected:",
