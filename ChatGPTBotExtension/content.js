@@ -21,8 +21,8 @@ function sleep(ms) {
 
 let lastCommandId = null;
 
-const VISION_ARTIFACT_TIMEOUT_MS = 80000;
-const VISION_BUSY_EXPIRE_MS = 120000;
+const VISION_ARTIFACT_TIMEOUT_MS = 100000;
+const VISION_BUSY_EXPIRE_MS = 150000;
 const VISION_BUSY_STORAGE_KEY = "chatgpt_queue_vision_busy_v1";
 const VISION_RESULT_DOCUMENT_NAME = "vision-result.task.md";
 
@@ -1831,7 +1831,7 @@ function getLatestAssistantText() {
 // VISION RESULT DOCUMENT PREVIEW
 // =========================================================
 
-function getVisionResultDocumentButtons() {
+function getVisionResultDocumentButtons(expectedName = VISION_RESULT_DOCUMENT_NAME) {
 
     const buttons =
         Array.from(
@@ -1854,7 +1854,7 @@ function getVisionResultDocumentButtons() {
 
 
             return label.includes(
-                VISION_RESULT_DOCUMENT_NAME
+                expectedName
             );
         }
     );
@@ -1912,7 +1912,7 @@ function snapshotVisionOverlayNodes() {
     return new Set(document.querySelectorAll('div[data-selected-text-overlay-target]'));
 }
 
-async function waitForVisionPreviewContent(expectedButton, baselineOverlays) {
+async function waitForVisionPreviewContent(expectedButton, baselineOverlays, attemptId) {
     const startedAt = Date.now();
     let lastLog = -5000;
     const before = baselineOverlays || new Set();
@@ -1921,7 +1921,7 @@ async function waitForVisionPreviewContent(expectedButton, baselineOverlays) {
         const panel = getOpenVisionPreviewPanel();
         if (panel) {
             const parsed = parseValidVisionJson(extractOpenVisionPreviewContent());
-            if (parsed) {
+            if (parsed && extractOpenVisionPreviewContent().includes("ATTEMPT_ID:" + attemptId)) {
                 console.log("VISION_PREVIEW_CAPTURE", {source: "named-panel", elapsedMs: Date.now()-startedAt});
                 return parsed;
             }
@@ -1934,7 +1934,7 @@ async function waitForVisionPreviewContent(expectedButton, baselineOverlays) {
             if (before.has(node) || !node.getClientRects().length) continue;
             if (!Array.from(node.classList).some(c => c.startsWith("MarkdownRoot"))) continue;
             const parsed = parseValidVisionJson(String(node.innerText || node.textContent || "").trim());
-            if (parsed) {
+            if (parsed && String(node.innerText || node.textContent || "").includes("ATTEMPT_ID:" + attemptId)) {
                 console.log("VISION_PREVIEW_CAPTURE", {
                     source: "new-markdown-overlay",
                     elapsedMs: Date.now()-startedAt,
@@ -1961,7 +1961,7 @@ async function waitForVisionPreviewContent(expectedButton, baselineOverlays) {
 
 
 async function waitForVisionResultDocument(
-    baselineButtons
+    baselineButtons, expectedName, attemptId
 ) {
 
     const startedAt =
@@ -1987,7 +1987,7 @@ async function waitForVisionResultDocument(
     ) {
 
         const buttons =
-            getVisionResultDocumentButtons();
+            getVisionResultDocumentButtons(expectedName);
 
 
         const button =
@@ -2013,7 +2013,7 @@ async function waitForVisionResultDocument(
             const overlayBaseline = snapshotVisionOverlayNodes();
             console.log("VISION_PREVIEW_OPEN", { baselineOverlayCount: overlayBaseline.size });
             button.click();
-            return await waitForVisionPreviewContent(button, overlayBaseline);
+            return await waitForVisionPreviewContent(button, overlayBaseline, attemptId);
         }
 
 
@@ -2024,7 +2024,7 @@ async function waitForVisionResultDocument(
 
 
     throw new Error(
-        "vision-result.task.md document was not available within 80 seconds."
+        expectedName + " document was not available within 100 seconds."
     );
 }
 
@@ -2662,8 +2662,13 @@ async function processCommand(command) {
             );
 
 
+            const expectedName = String(command.resultDocumentName || "");
+            if (!/^vision-result-[a-f0-9-]{36}\.task\.md$/i.test(expectedName)
+                || expectedName !== "vision-result-" + command.id + ".task.md") {
+                throw new Error("VISION_ATTEMPT_ID_MISSING_OR_INVALID");
+            }
             const documentBaseline =
-                getVisionResultDocumentButtons();
+                getVisionResultDocumentButtons(expectedName);
 
 
             console.log(
@@ -2679,7 +2684,7 @@ async function processCommand(command) {
 
             const visionJson =
                 await waitForVisionResultDocument(
-                    documentBaseline
+                    documentBaseline, expectedName, command.id
                 );
 
 
