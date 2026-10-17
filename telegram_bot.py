@@ -148,11 +148,11 @@ TELEGRAM_STATUS_MESSAGE_TIMEOUT_SECONDS = 8
 # Hard upper bound for one Vision job as observed by the Telegram worker.
 # The underlying Bridge call runs in a worker thread, so the outer asyncio
 # timeout is authoritative and prevents the queue from hanging indefinitely.
-VISION_JOB_TIMEOUT_SECONDS = 90
+VISION_JOB_TIMEOUT_SECONDS = 120
 
-# User-visible Vision progress window. The extension waits up to 80 seconds
-# for vision-result.json; the worker gets a 10-second outer safety margin.
-VISION_PROGRESS_WINDOW_SECONDS = 80
+# Vision preview waits up to 100s, Bridge client up to 110s,
+# worker up to 120s. Keep these limits in sync.
+VISION_PROGRESS_WINDOW_SECONDS = 100
 VISION_PROGRESS_UPDATE_SECONDS = 10
 
 # =========================================================
