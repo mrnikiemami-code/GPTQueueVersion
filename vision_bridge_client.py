@@ -677,7 +677,7 @@ def analyze_image_via_bridge(
         # Unique per attempt; generated anew for Vision retry, NOT for Google retry.
         "resultDocumentName": f"vision-result-{command_id}.task.md",
         "prompt": VISION_PROMPT + (
-            "\\n\\nقانون مهم برای همین تلاش: "
+            "\n\nقانون مهم برای همین تلاش: "
             f"فایل خروجی را دقیقاً با نام vision-result-{command_id}.task.md بساز. "
             f"در ابتدای محتوای فایل یک خط شامل ATTEMPT_ID:{command_id} قرار بده؛ "
             "سپس در خط بعد فقط JSON هشت‌فیلدی مقرر را قرار بده. "
