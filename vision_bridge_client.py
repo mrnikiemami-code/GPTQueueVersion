@@ -24,7 +24,7 @@ BRIDGE_REQUEST_READ_TIMEOUT_SECONDS = 30
 # Extension waits up to 80s for the Vision document artifact/preview.
 # Keep the Bridge client slightly above that, but below the Telegram worker's
 # 90s hard limit so no background polling thread survives after the worker moves on.
-VISION_RESULT_TIMEOUT_SECONDS = 85
+VISION_RESULT_TIMEOUT_SECONDS = 110
 VISION_RESULT_POLL_INTERVAL_SECONDS = 2
 
 # اگر POST فرمان به دلیل قطع لحظه‌ای شبکه Local شکست خورد،
@@ -674,7 +674,15 @@ def analyze_image_via_bridge(
         ),
         "mimeType": mime_type,
         "imageBase64": image_base64,
-        "prompt": VISION_PROMPT,
+        # Unique per attempt; generated anew for Vision retry, NOT for Google retry.
+        "resultDocumentName": f"vision-result-{command_id}.task.md",
+        "prompt": VISION_PROMPT + (
+            "\\n\\nقانون مهم برای همین تلاش: "
+            f"فایل خروجی را دقیقاً با نام vision-result-{command_id}.task.md بساز. "
+            f"در ابتدای محتوای فایل یک خط شامل ATTEMPT_ID:{command_id} قرار بده؛ "
+            "سپس در خط بعد فقط JSON هشت‌فیلدی مقرر را قرار بده. "
+            "هیچ خروجی مربوط به تصویر یا درخواست قبلی را استفاده نکن."
+        ),
     }
 
     print("")
