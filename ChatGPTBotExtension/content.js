@@ -2077,6 +2077,39 @@ async function waitForVisionResultDocument(
             }
             if (Date.now() - startedAt - lastPreviewLog >= 5000) {
                 lastPreviewLog = Date.now() - startedAt;
+                // Diagnostics only: never change eligibility, selection or timing.
+                // Do not log file text or extracted personal information.
+                const diagnosticOverlays = Array.from(document.querySelectorAll(
+                    'div[data-selected-text-overlay-target]'
+                ));
+                const diagnosticPanels = Array.from(document.querySelectorAll(
+                    '[role="tabpanel"]'
+                ));
+                const diagnosticMatchingOverlays = diagnosticOverlays.filter(node =>
+                    String(node.innerText || node.textContent || "")
+                        .includes("ATTEMPT_ID:" + attemptId)
+                );
+                console.log("VISION_PREVIEW_DIAGNOSTIC", {
+                    attemptId,
+                    elapsedMs: lastPreviewLog,
+                    panelCount: diagnosticPanels.length,
+                    panelLabels: diagnosticPanels.map(node => ({
+                        label: node.getAttribute("aria-label"),
+                        controller: node.getAttribute("data-app-shell-tab-panel-controller")
+                    })),
+                    overlayCount: diagnosticOverlays.length,
+                    reusedOverlayCount: diagnosticOverlays.filter(node =>
+                        overlayBaseline.has(node)
+                    ).length,
+                    matchingOverlayCount: diagnosticMatchingOverlays.length,
+                    matchingOverlayStates: diagnosticMatchingOverlays.map(node => ({
+                        baseline: overlayBaseline.has(node),
+                        visible: Boolean(node.getClientRects().length),
+                        markdownRoot: Array.from(node.classList).some(c =>
+                            c.startsWith("MarkdownRoot")
+                        )
+                    }))
+                });
                 console.log("VISION_PREVIEW_WAIT", {
                     elapsedMs: lastPreviewLog,
                     namedPanelFound: Boolean(panel),
