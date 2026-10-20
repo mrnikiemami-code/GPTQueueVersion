@@ -2065,7 +2065,7 @@ async function waitForVisionResultDocument(
             if (fileResult) {
                 // Never discard an already-valid DOM candidate solely because
                 // its one-second stability interval has not elapsed yet.
-                if (domCandidate) {
+                if (domCandidate && Date.now() - domCandidateAt < 1000) {
                     await sleep(250);
                     continue;
                 }
