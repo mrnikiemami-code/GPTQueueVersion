@@ -1996,7 +1996,7 @@ async function waitForVisionResultDocument(
     // A single orchestrator owns the result. Neither source sends to Bridge.
     // Keep scanning the DOM even after opening the file preview.
     while (Date.now() - startedAt < VISION_ARTIFACT_TIMEOUT_MS) {
-        const result = findVisionDomReply(attemptId, baselineIds);
+        const result = null; // TEMP PLAN_B_ONLY TEST; revert this commit to restore Plan A.
         if (result) {
             if (domCandidate?.messageId === result.messageId &&
                 domCandidate?.body === result.body &&
