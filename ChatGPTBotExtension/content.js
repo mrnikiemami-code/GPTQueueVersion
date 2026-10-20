@@ -1984,37 +1984,24 @@ function findVisionDomReply(attemptId, baselineIds) {
 async function waitForVisionResultDocument(
     baselineButtons, expectedName, attemptId, baselineIds
 ) {
-
-    const startedAt =
-        Date.now();
-
-
+    const startedAt = Date.now();
+    const baselineSet = new Set(Array.isArray(baselineButtons) ? baselineButtons : []);
     let domCandidate = null;
     let domCandidateAt = 0;
+    let previewOpened = false;
+    let overlayBaseline = null;
+    let previewButton = null;
+    let lastPreviewLog = -5000;
 
-    const baselineSet =
-        new Set(
-            Array.isArray(
-                baselineButtons
-            )
-                ? baselineButtons
-                : []
-        );
-
-
-    while (
-        (
-            Date.now() -
-            startedAt
-        ) <
-        VISION_ARTIFACT_TIMEOUT_MS
-    ) {
-
+    // A single orchestrator owns the result. Neither source sends to Bridge.
+    // Keep scanning the DOM even after opening the file preview.
+    while (Date.now() - startedAt < VISION_ARTIFACT_TIMEOUT_MS) {
         const result = findVisionDomReply(attemptId, baselineIds);
         if (result) {
             if (domCandidate?.messageId === result.messageId &&
                 domCandidate?.body === result.body &&
                 Date.now() - domCandidateAt >= 1000) {
+                console.log("VISION_RESULT_CLAIMED", {source: "dom", attemptId});
                 console.log("VISION_DOM_CAPTURE", {attemptId, messageId: result.messageId});
                 return result.json;
             }
@@ -2027,48 +2014,84 @@ async function waitForVisionResultDocument(
             domCandidate = null;
         }
 
-        const buttons =
-            getVisionResultDocumentButtons(expectedName);
-
-
-        const button =
-            buttons.find(
-                candidate =>
-                    !baselineSet.has(
-                        candidate
-                    )
-            );
-
-
-        if (button && Date.now() - startedAt >= 30000) {
-
-            console.log(
-                "VISION document artifact detected:",
-                {
-                    ariaLabel:
-                        button.getAttribute(
-                            "aria-label"
-                        )
-                }
-            );
-            const overlayBaseline = snapshotVisionOverlayNodes();
-            console.log("VISION_PREVIEW_OPEN", { baselineOverlayCount: overlayBaseline.size });
-            button.click();
-            return await waitForVisionPreviewContent(button, overlayBaseline, attemptId);
+        // File discovery is independent of DOM availability. Open just once:
+        // clicking the same button again would toggle the preview closed.
+        if (!previewOpened) {
+            previewButton = getVisionResultDocumentButtons(expectedName)
+                .find(button => !baselineSet.has(button));
+            if (previewButton) {
+                console.log("VISION document artifact detected:", {
+                    ariaLabel: previewButton.getAttribute("aria-label")
+                });
+                overlayBaseline = snapshotVisionOverlayNodes();
+                console.log("VISION_PREVIEW_OPEN", {
+                    baselineOverlayCount: overlayBaseline.size
+                });
+                previewOpened = true;
+                previewButton.click();
+            }
         }
 
-
-        await sleep(
-            500
-        );
+        if (previewOpened) {
+            // Nonblocking counterpart of waitForVisionPreviewContent.
+            // Preserve the same strict current-Attempt marker validation.
+            let fileResult = null;
+            let source = "";
+            const panel = getOpenVisionPreviewPanel(expectedName);
+            if (panel) {
+                const content = extractOpenVisionPreviewContent(expectedName);
+                if (content.includes("ATTEMPT_ID:" + attemptId)) {
+                    fileResult = parseValidVisionJson(content);
+                    source = "named-panel";
+                }
+            }
+            if (!fileResult) {
+                const overlays = Array.from(document.querySelectorAll(
+                    'div[data-selected-text-overlay-target]'
+                ));
+                for (const node of overlays) {
+                    if (overlayBaseline.has(node) || !node.getClientRects().length) continue;
+                    if (!Array.from(node.classList).some(c => c.startsWith("MarkdownRoot"))) continue;
+                    const content = String(node.innerText || node.textContent || "");
+                    if (!content.includes("ATTEMPT_ID:" + attemptId)) continue;
+                    fileResult = parseValidVisionJson(content.trim());
+                    if (fileResult) {
+                        source = "new-markdown-overlay";
+                        break;
+                    }
+                }
+            }
+            // DOM wins whenever both are valid in the same scan.
+            if (fileResult) {
+                // Never discard an already-valid DOM candidate solely because
+                // its one-second stability interval has not elapsed yet.
+                if (domCandidate) {
+                    await sleep(250);
+                    continue;
+                }
+                console.log("VISION_PREVIEW_CAPTURE", {
+                    source, elapsedMs: Date.now() - startedAt
+                });
+                console.log("VISION_RESULT_CLAIMED", {source: "file", attemptId});
+                return fileResult;
+            }
+            if (Date.now() - startedAt - lastPreviewLog >= 5000) {
+                lastPreviewLog = Date.now() - startedAt;
+                console.log("VISION_PREVIEW_WAIT", {
+                    elapsedMs: lastPreviewLog,
+                    namedPanelFound: Boolean(panel),
+                    documentButtonPresent: Boolean(previewButton?.isConnected)
+                });
+            }
+        }
+        await sleep(250);
     }
 
-
+    // Keep existing no-result behavior and exact timeout error unchanged.
     throw new Error(
         expectedName + " document was not available within 100 seconds."
     );
 }
-
 
 async function closeVisionPreview() {
 
