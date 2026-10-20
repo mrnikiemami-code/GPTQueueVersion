@@ -2690,8 +2690,11 @@ async def retry_job_by_id(update, job_id, application=None):
             )
 
         message = (
-            "🔄 پردازش تصویر دوباره در صف قرار گرفت.\n"
-            "📷 همان عکس ذخیره‌شده استفاده می‌شود و لازم نیست دوباره ارسالش کنی.\n\n"
+            "🔄 عکس ذخیره‌شده دوباره در صف پردازش قرار گرفت.\n"
+            "📷 Retry از همان Worker ارسال عادی تصویر استفاده می‌کند.\n"
+            "⏳ شمارش معکوس ۱۰۰ ثانیه‌ای پس از شروع واقعی نوبت این عکس "
+            "در یک پیام جداگانه نمایش داده می‌شود.\n"
+            "اگر ارسال پیام پیشرفت ناموفق باشد، خطا گزارش می‌شود.\n\n"
             f"Job ID: {job_id}"
         )
 
@@ -4348,6 +4351,14 @@ async def _start_vision_progress(
             "VISION PROGRESS START WARNING:",
             job_id,
             repr(ex),
+        )
+        # Never silently lose all user-visible status. The same worker handles
+        # both new images and manually requeued Vision jobs.
+        await _safe_bot_send(
+            application.bot,
+            chat_id,
+            "⚠️ پیام شمارش معکوس قابل ارسال نبود؛ پردازش از همان صف ادامه دارد.\n"
+            f"Job ID: {job_id}",
         )
         return None, None
 
