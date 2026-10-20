@@ -4278,98 +4278,88 @@ def _vision_progress_text(
     )
 
 
-async def _vision_progress_loop(
-    bot,
-    chat_id,
-    message_id,
-    job_id
-):
+async def _vision_progress_loop(bot, chat_id, message_id, job_id):
     started_at = time.monotonic()
+    update_failures = 0
+    replacement_sent = False
 
     while True:
-        await asyncio.sleep(
-            VISION_PROGRESS_UPDATE_SECONDS
-        )
-
-        elapsed = int(
-            time.monotonic()
-            - started_at
-        )
-
-        remaining = max(
-            0,
-            VISION_PROGRESS_WINDOW_SECONDS
-            - elapsed
-        )
+        await asyncio.sleep(VISION_PROGRESS_UPDATE_SECONDS)
+        elapsed = int(time.monotonic() - started_at)
+        remaining = max(0, VISION_PROGRESS_WINDOW_SECONDS - elapsed)
+        status_text = _vision_progress_text(job_id, remaining)
 
         try:
             await asyncio.wait_for(
                 bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
-                    text=_vision_progress_text(
-                        job_id,
-                        remaining,
-                    ),
+                    text=status_text,
                 ),
                 timeout=TELEGRAM_STATUS_MESSAGE_TIMEOUT_SECONDS,
             )
+            update_failures = 0
         except asyncio.CancelledError:
             raise
         except Exception as ex:
+            update_failures += 1
             print(
                 "VISION PROGRESS UPDATE WARNING:",
-                job_id,
-                repr(ex),
+                job_id, type(ex).__name__, str(ex),
             )
+            # Some Bale messages cannot be edited. Keep the timer visible
+            # without starting another Vision job or changing its queue state.
+            if not replacement_sent and update_failures >= 2:
+                try:
+                    replacement = await asyncio.wait_for(
+                        bot.send_message(chat_id=chat_id, text=status_text),
+                        timeout=TELEGRAM_STATUS_MESSAGE_TIMEOUT_SECONDS,
+                    )
+                    message_id = replacement.message_id
+                    replacement_sent = True
+                    update_failures = 0
+                    print("VISION PROGRESS REPLACEMENT SENT:", job_id)
+                except Exception as send_ex:
+                    print(
+                        "VISION PROGRESS REPLACEMENT WARNING:",
+                        job_id, type(send_ex).__name__, str(send_ex),
+                    )
 
         if remaining <= 0:
             return
 
 
-async def _start_vision_progress(
-    application,
-    chat_id,
-    job_id
-):
-    try:
-        message = await asyncio.wait_for(
-            application.bot.send_message(
-                chat_id=chat_id,
-                text=_vision_progress_text(
-                    job_id,
-                    VISION_PROGRESS_WINDOW_SECONDS,
+async def _start_vision_progress(application, chat_id, job_id):
+    for attempt in range(2):
+        try:
+            message = await asyncio.wait_for(
+                application.bot.send_message(
+                    chat_id=chat_id,
+                    text=_vision_progress_text(
+                        job_id, VISION_PROGRESS_WINDOW_SECONDS,
+                    ),
                 ),
-            ),
-            timeout=TELEGRAM_STATUS_MESSAGE_TIMEOUT_SECONDS,
-        )
-    except Exception as ex:
-        print(
-            "VISION PROGRESS START WARNING:",
-            job_id,
-            repr(ex),
-        )
-        # Never silently lose all user-visible status. The same worker handles
-        # both new images and manually requeued Vision jobs.
-        await _safe_bot_send(
-            application.bot,
-            chat_id,
-            "⚠️ نمایش زمان پردازش با مشکل روبه‌رو شد. "
-            "عکس شما محفوظ است و نتیجه یا خطای پردازش اطلاع داده می‌شود.\n"
-            f"شماره پیگیری: {job_id}",
-        )
-        return None, None
+                timeout=TELEGRAM_STATUS_MESSAGE_TIMEOUT_SECONDS,
+            )
+            print("VISION PROGRESS STARTED:", job_id, message.message_id)
+            task = application.create_task(
+                _vision_progress_loop(
+                    application.bot, chat_id, message.message_id, job_id,
+                )
+            )
+            return message.message_id, task
+        except Exception as ex:
+            print(
+                "VISION PROGRESS START WARNING:",
+                job_id, "attempt", attempt + 1,
+                type(ex).__name__, str(ex),
+            )
+            if attempt == 0:
+                await asyncio.sleep(1)
 
-    task = application.create_task(
-        _vision_progress_loop(
-            application.bot,
-            chat_id,
-            message.message_id,
-            job_id,
-        )
-    )
-
-    return message.message_id, task
+    # Do not stop image processing if Bale's status-message API fails.
+    print("VISION PROGRESS UNAVAILABLE:", job_id)
+    return None, None
 
 
 async def _finish_vision_progress(
