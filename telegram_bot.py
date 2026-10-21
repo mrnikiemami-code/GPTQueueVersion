@@ -189,37 +189,44 @@ def analyze_image_via_api(image_path, job_id=None):
     if VISION_API_KEY:
         headers["Authorization"] = "Bearer " + VISION_API_KEY
 
-    response = requests.post(
-        url,
-        headers=headers,
-        json={
-            "model": VISION_API_MODEL,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": (
-                        VISION_PROMPT.split("قانون خروجی نهایی:", 1)[0]
-                        + "\n\nدستور تکمیلی مخصوص استخراج از API: "
-                        + "ابتدا فقط متن واقعی تصویر را بخوان؛ اطلاعات مخاطب را از متن پیام و کارت تماس تفکیک کن. "
-                        + "برای phoneNumber مهم‌ترین معیار شباهت دقیق شکل هر رقم در تصویر است، نه معتبر به نظر رسیدن شماره. "
-                        + "شماره فارسی را از چپ به راست، موقعیت‌به‌موقعیت و بدون تغییر ترتیب رونویسی کن. "
-                        + "پیش از تبدیل ارقام به لاتین، هر رقم را مستقلاً با همان بخش از تصویر تطبیق بده؛ "
-                        + "به‌ویژه رقم فارسی ۴ (چهار) را با ۳ (سه) عوض نکن و هیچ رقم را از روی حدس یا الگوی شماره تکمیل نکن. "
-                        + "اگر حتی یک رقم قابل تشخیص قطعی نیست، phoneNumber را رشته خالی بگذار، نه شماره احتمالی. "
-                        + "پس از خواندن شماره، یک بار دیگر از خود تصویر به‌صورت مستقل بازخوانی کن و فقط در صورت تطابق کامل خروجی بده. "
-                        + "این بررسی را درونی انجام بده و مراحل آن را در پاسخ ننویس. "
-                        + "\nفقط یک شیء JSON خام با همان هشت فیلد برگردان؛ "
-                        + "هیچ فایل، لینک Markdown، sandbox:/mnt/data، data: URL، کدبلاک یا توضیح دیگری تولید نکن. "
-                        + "تمام مقادیر رشته باشند و فیلدهای نامشخص رشته خالی باشند."
-                    )},
-                    {"type": "image_url", "image_url": {
-                        "url": f"data:{mime_type};base64,{image_b64}"
-                    }},
-                ],
-            }],
-        },
-        timeout=(10, VISION_PROGRESS_WINDOW_SECONDS),
-    )
+    # Python talks only to loopback; .NET makes the direct no-proxy Metis call.
+    # Do not fall back to Python egress and do not retry this non-idempotent POST.
+    from urllib.parse import quote
+    relay_url = "http://127.0.0.1:8768/vision/metis?target=" + quote(url, safe="")
+    print("VISION_TRANSPORT:", "job_id=", job_id, "transport=dotnet", "proxy=disabled")
+    with requests.Session() as session:
+        session.trust_env = False  # Never route the localhost hop through a proxy.
+        response = session.post(
+            url,
+            headers=headers,
+            json={
+                "model": VISION_API_MODEL,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": (
+                            VISION_PROMPT.split("قانون خروجی نهایی:", 1)[0]
+                            + "\n\nدستور تکمیلی مخصوص استخراج از API: "
+                            + "ابتدا فقط متن واقعی تصویر را بخوان؛ اطلاعات مخاطب را از متن پیام و کارت تماس تفکیک کن. "
+                            + "برای phoneNumber مهم‌ترین معیار شباهت دقیق شکل هر رقم در تصویر است، نه معتبر به نظر رسیدن شماره. "
+                            + "شماره فارسی را از چپ به راست، موقعیت‌به‌موقعیت و بدون تغییر ترتیب رونویسی کن. "
+                            + "پیش از تبدیل ارقام به لاتین، هر رقم را مستقلاً با همان بخش از تصویر تطبیق بده؛ "
+                            + "به‌ویژه رقم فارسی ۴ (چهار) را با ۳ (سه) عوض نکن و هیچ رقم را از روی حدس یا الگوی شماره تکمیل نکن. "
+                            + "اگر حتی یک رقم قابل تشخیص قطعی نیست، phoneNumber را رشته خالی بگذار، نه شماره احتمالی. "
+                            + "پس از خواندن شماره، یک بار دیگر از خود تصویر به‌صورت مستقل بازخوانی کن و فقط در صورت تطابق کامل خروجی بده. "
+                            + "این بررسی را درونی انجام بده و مراحل آن را در پاسخ ننویس. "
+                            + "\nفقط یک شیء JSON خام با همان هشت فیلد برگردان؛ "
+                            + "هیچ فایل، لینک Markdown، sandbox:/mnt/data، data: URL، کدبلاک یا توضیح دیگری تولید نکن. "
+                            + "تمام مقادیر رشته باشند و فیلدهای نامشخص رشته خالی باشند."
+                        )},
+                        {"type": "image_url", "image_url": {
+                            "url": f"data:{mime_type};base64,{image_b64}"
+                        }},
+                    ],
+                }],
+            },
+            timeout=(10, VISION_PROGRESS_WINDOW_SECONDS),
+        )
     print("VISION API RESPONSE:", "status=", response.status_code,
           "body_preview=", response.text[:3000])
     response.raise_for_status()
