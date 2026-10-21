@@ -148,11 +148,11 @@ TELEGRAM_STATUS_MESSAGE_TIMEOUT_SECONDS = 8
 # Hard upper bound for one Vision job as observed by the Telegram worker.
 # The underlying Bridge call runs in a worker thread, so the outer asyncio
 # timeout is authoritative and prevents the queue from hanging indefinitely.
-VISION_JOB_TIMEOUT_SECONDS = 120
+VISION_JOB_TIMEOUT_SECONDS = 160
 
-# Vision preview waits up to 100s, Bridge client up to 110s,
-# worker up to 120s. Keep these limits in sync.
-VISION_PROGRESS_WINDOW_SECONDS = 100
+# The extension waits 140s; Bridge allows 150s, worker 160s.
+# Only the active Vision processing countdown is 140s.
+VISION_PROGRESS_WINDOW_SECONDS = 140
 VISION_PROGRESS_UPDATE_SECONDS = 10
 
 # =========================================================
@@ -4498,16 +4498,15 @@ async def _process_queued_job(application, queue_job):
         lastError=None,
     )
 
-    progress_message_id, progress_task = (
-        await _start_vision_progress(
-            application,
-            chat_id,
-            job_id,
-        )
-    )
+    progress_message_id, progress_task = None, None
 
     try:
         async with processing_lock:
+            # Keep the Retry receipt in "queued" state until this job owns
+            # the actual processing lock. Only then begin the countdown.
+            progress_message_id, progress_task = await _start_vision_progress(
+                application, chat_id, job_id,
+            )
             data = await asyncio.wait_for(
                 asyncio.to_thread(
                     analyze_image_via_bridge,
