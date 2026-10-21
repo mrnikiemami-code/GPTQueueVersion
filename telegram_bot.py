@@ -161,11 +161,15 @@ VISION_JOB_TIMEOUT_SECONDS = 160
 VISION_PROGRESS_WINDOW_SECONDS = 140
 VISION_PROGRESS_UPDATE_SECONDS = 10
 
-# Default remains the existing Chrome/Bridge path. API is opt-in only.
-VISION_PROVIDER = os.environ.get("VISION_PROVIDER", "bridge").strip().lower() or "bridge"
-VISION_API_BASE_URL = os.environ.get("VISION_API_BASE_URL", "").strip()
-VISION_API_KEY = os.environ.get("VISION_API_KEY", "").strip()
-VISION_API_MODEL = os.environ.get("VISION_API_MODEL", "deepseek-v4-flash").strip()
+# Vision provider settings live in the existing, git-ignored config.json.
+# Missing "vision" preserves the current Bridge behavior.
+_vision_config = config.get("vision") or {}
+if not isinstance(_vision_config, dict):
+    raise ValueError("config.json: vision must be a JSON object")
+VISION_PROVIDER = str(_vision_config.get("provider") or "bridge").strip().lower()
+VISION_API_BASE_URL = str(_vision_config.get("baseUrl") or "").strip()
+VISION_API_KEY = str(_vision_config.get("apiKey") or "").strip()
+VISION_API_MODEL = str(_vision_config.get("model") or "deepseek-v4-flash").strip()
 
 def analyze_image_via_api(image_path):
     """OpenAI-compatible vision endpoint; no implicit fallback or resend."""
