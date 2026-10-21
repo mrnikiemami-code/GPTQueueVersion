@@ -172,7 +172,7 @@ VISION_API_BASE_URL = str(_vision_config.get("baseUrl") or "").strip()
 VISION_API_KEY = str(_vision_config.get("apiKey") or "").strip()
 VISION_API_MODEL = str(_vision_config.get("model") or "deepseek-v4-flash").strip()
 
-def analyze_image_via_api(image_path):
+def analyze_image_via_api(image_path, job_id=None):
     """OpenAI-compatible vision endpoint; no implicit fallback or resend."""
     if not VISION_API_BASE_URL:
         raise ValueError("VISION_API_BASE_URL is required for VISION_PROVIDER=api")
@@ -224,6 +224,9 @@ def analyze_image_via_api(image_path):
           "body_preview=", response.text[:3000])
     response.raise_for_status()
     result = response.json()
+    returned_model = result.get("model") if isinstance(result, dict) else None
+    print("VISION_MODEL_RETURNED:", "job_id=", job_id,
+          "model=", returned_model or "not_reported")
     content = result["choices"][0]["message"]["content"]
     if isinstance(content, list):
         content = "\n".join(
@@ -244,12 +247,15 @@ def analyze_image_via_api(image_path):
     return normalize_data(extract_json_from_text(content))
 
 
-def analyze_image_via_selected_provider(image_path):
+def analyze_image_via_selected_provider(image_path, job_id=None):
     """One common queue/worker; precisely one chosen Vision provider per job."""
+    print("VISION_PROVIDER:", "job_id=", job_id, "provider=", VISION_PROVIDER)
+    print("VISION_MODEL_REQUESTED:", "job_id=", job_id,
+          "model=", VISION_API_MODEL if VISION_PROVIDER == "api" else "browser_ui")
     if VISION_PROVIDER == "bridge":
         return analyze_image_via_bridge(image_path)
     if VISION_PROVIDER == "api":
-        return analyze_image_via_api(image_path)
+        return analyze_image_via_api(image_path, job_id=job_id)
     raise ValueError(f"Unsupported VISION_PROVIDER: {VISION_PROVIDER}")
 
 
@@ -4578,6 +4584,7 @@ async def _process_queued_job(application, queue_job):
                 asyncio.to_thread(
                     analyze_image_via_selected_provider,
                     image_path,
+                    job_id,
                 ),
                 timeout=VISION_JOB_TIMEOUT_SECONDS,
             )
