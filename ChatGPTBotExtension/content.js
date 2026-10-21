@@ -22,7 +22,7 @@ function sleep(ms) {
 let lastCommandId = null;
 
 const VISION_ARTIFACT_TIMEOUT_MS = 140000;
-const VISION_BUSY_EXPIRE_MS = 150000;
+const VISION_BUSY_EXPIRE_MS = 190000;
 const VISION_BUSY_STORAGE_KEY = "chatgpt_queue_vision_busy_v1";
 const VISION_RESULT_DOCUMENT_NAME = "vision-result.task.md";
 
