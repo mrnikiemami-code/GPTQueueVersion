@@ -11,9 +11,62 @@ builder.Services.AddHttpClient("google-post", c => c.Timeout = TimeSpan.FromSeco
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddHttpClient("google-get", c => c.Timeout = TimeSpan.FromSeconds(85))
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = true });
+// Vision API transport only: direct .NET egress, with no environment/system proxy.
+builder.Services.AddHttpClient("metis-vision", c => c.Timeout = TimeSpan.FromSeconds(135))
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+    {
+        UseProxy = false,
+        AllowAutoRedirect = false
+    });
 var app = builder.Build();
 
 app.MapGet("/health", () => Results.Ok(new { success = true, provider = "bale" }));
+
+// A single-attempt, localhost-only transport for the existing Python Vision queue.
+// Never sends to arbitrary hosts; never logs the image, credential, or model output.
+app.MapPost("/vision/metis", async (HttpContext context, IHttpClientFactory factory) =>
+{
+    var target = context.Request.Query["target"].ToString();
+    if (!Uri.TryCreate(target, UriKind.Absolute, out var uri)
+        || uri.Scheme != Uri.UriSchemeHttps
+        || uri.Host != "api.metisai.ir"
+        || uri.Port != 443
+        || !uri.AbsolutePath.EndsWith("/chat/completions", StringComparison.Ordinal)
+        || !string.IsNullOrEmpty(uri.Query)
+        || !string.IsNullOrEmpty(uri.Fragment)
+        || string.IsNullOrEmpty(context.Request.Headers.Authorization.ToString()))
+    {
+        return Results.BadRequest(new { error = "Invalid Vision API destination or authorization" });
+    }
+
+    using var request = new HttpRequestMessage(HttpMethod.Post, uri);
+    request.Content = new StreamContent(context.Request.Body);
+    request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+    request.Headers.TryAddWithoutValidation("Authorization",
+        context.Request.Headers.Authorization.ToString());
+
+    try
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        using var response = await factory.CreateClient("metis-vision").SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
+        context.Response.StatusCode = (int)response.StatusCode;
+        if (response.Content.Headers.ContentType is not null)
+            context.Response.ContentType = response.Content.Headers.ContentType.ToString();
+        Console.WriteLine($"VISION_RELAY status={(int)response.StatusCode} elapsed={watch.ElapsedMilliseconds}ms proxy=disabled");
+        await response.Content.CopyToAsync(context.Response.Body, context.RequestAborted);
+    }
+    catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+    {
+        Console.Error.WriteLine("VISION_RELAY_ERROR " + ex.GetType().Name);
+        if (!context.Response.HasStarted)
+        {
+            context.Response.StatusCode = StatusCodes.Status502BadGateway;
+            await context.Response.WriteAsJsonAsync(new { error = "Vision upstream connection failed" });
+        }
+    }
+    return Results.Empty;
+});
 
 // Opt-in Google transport for Bale mode. A non-retrying local HTTP relay,
 // not an independent Google Sheets writer. Python remains owner of request IDs
