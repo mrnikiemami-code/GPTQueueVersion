@@ -205,6 +205,8 @@ def analyze_image_via_api(image_path):
         },
         timeout=(10, VISION_PROGRESS_WINDOW_SECONDS),
     )
+    print("VISION API RESPONSE:", "status=", response.status_code,
+          "body_preview=", response.text[:3000])
     response.raise_for_status()
     result = response.json()
     content = result["choices"][0]["message"]["content"]
@@ -4624,6 +4626,9 @@ async def _process_queued_job(application, queue_job):
         return
 
     except json.JSONDecodeError as ex:
+        print("VISION JSON DECODE ERROR:", job_id, "provider=", VISION_PROVIDER,
+              "line=", ex.lineno, "column=", ex.colno, "message=", ex.msg)
+        traceback.print_exc()
         # Never auto-run Vision a second time for the same persisted image.
         # A capture/parsing failure is kept for explicit user Retry only.
         # This prevents a late/ambiguous first result from causing another
