@@ -197,7 +197,13 @@ def analyze_image_via_api(image_path):
             "messages": [{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": VISION_PROMPT},
+                    {"type": "text", "text": (
+                        VISION_PROMPT
+                        + "\n\nبرای این درخواست API فقط یک شیء JSON خام با همان هشت فیلد برگردان. "
+                        + "هیچ فایل، لینک Markdown، sandbox:/mnt/data، data: URL، "
+                        + "کدبلاک یا توضیح دیگری تولید نکن. "
+                        + "تمام مقادیر رشته باشند و فیلدهای نامشخص رشته خالی باشند."
+                    )},
                     {"type": "image_url", "image_url": {
                         "url": f"data:{mime_type};base64,{image_b64}"
                     }},
