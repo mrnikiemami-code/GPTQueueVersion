@@ -28,7 +28,13 @@ from telegram.ext import (
     filters,
 )
 
-from vision_bridge_client import analyze_image_via_bridge
+from vision_bridge_client import (
+    analyze_image_via_bridge,
+    VISION_PROMPT,
+    image_file_to_base64,
+    extract_json_from_text,
+    normalize_data,
+)
 
 
 # =========================================================
@@ -154,6 +160,66 @@ VISION_JOB_TIMEOUT_SECONDS = 160
 # Only the active Vision processing countdown is 140s.
 VISION_PROGRESS_WINDOW_SECONDS = 140
 VISION_PROGRESS_UPDATE_SECONDS = 10
+
+# Default remains the existing Chrome/Bridge path. API is opt-in only.
+VISION_PROVIDER = os.environ.get("VISION_PROVIDER", "bridge").strip().lower() or "bridge"
+VISION_API_BASE_URL = os.environ.get("VISION_API_BASE_URL", "").strip()
+VISION_API_KEY = os.environ.get("VISION_API_KEY", "").strip()
+VISION_API_MODEL = os.environ.get("VISION_API_MODEL", "deepseek-v4-flash").strip()
+
+def analyze_image_via_api(image_path):
+    """OpenAI-compatible vision endpoint; no implicit fallback or resend."""
+    if not VISION_API_BASE_URL:
+        raise ValueError("VISION_API_BASE_URL is required for VISION_PROVIDER=api")
+    if not VISION_API_MODEL:
+        raise ValueError("VISION_API_MODEL is required for VISION_PROVIDER=api")
+
+    # Reuse the exact extraction prompt and JSON validation used by Bridge.
+    image_b64, mime_type = image_file_to_base64(image_path)
+    url = VISION_API_BASE_URL.rstrip("/")
+    if not url.endswith("/chat/completions"):
+        url += "/chat/completions"
+
+    headers = {"Content-Type": "application/json"}
+    if VISION_API_KEY:
+        headers["Authorization"] = "Bearer " + VISION_API_KEY
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json={
+            "model": VISION_API_MODEL,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": VISION_PROMPT},
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:{mime_type};base64,{image_b64}"
+                    }},
+                ],
+            }],
+        },
+        timeout=(10, VISION_PROGRESS_WINDOW_SECONDS),
+    )
+    response.raise_for_status()
+    result = response.json()
+    content = result["choices"][0]["message"]["content"]
+    if isinstance(content, list):
+        content = "\n".join(
+            item.get("text", "") for item in content
+            if isinstance(item, dict) and item.get("type") == "text"
+        )
+    return normalize_data(extract_json_from_text(content))
+
+
+def analyze_image_via_selected_provider(image_path):
+    """One common queue/worker; precisely one chosen Vision provider per job."""
+    if VISION_PROVIDER == "bridge":
+        return analyze_image_via_bridge(image_path)
+    if VISION_PROVIDER == "api":
+        return analyze_image_via_api(image_path)
+    raise ValueError(f"Unsupported VISION_PROVIDER: {VISION_PROVIDER}")
+
 
 # =========================================================
 # TELEGRAM NETWORK SETTINGS
@@ -4478,7 +4544,7 @@ async def _process_queued_job(application, queue_job):
             )
             data = await asyncio.wait_for(
                 asyncio.to_thread(
-                    analyze_image_via_bridge,
+                    analyze_image_via_selected_provider,
                     image_path,
                 ),
                 timeout=VISION_JOB_TIMEOUT_SECONDS,
