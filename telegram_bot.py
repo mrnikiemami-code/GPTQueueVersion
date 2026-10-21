@@ -198,7 +198,7 @@ def analyze_image_via_api(image_path, job_id=None):
                 "role": "user",
                 "content": [
                     {"type": "text", "text": (
-                        VISION_PROMPT
+                        VISION_PROMPT.split("قانون خروجی نهایی:", 1)[0]
                         + "\n\nدستور تکمیلی مخصوص استخراج از API: "
                         + "ابتدا فقط متن واقعی تصویر را بخوان؛ اطلاعات مخاطب را از متن پیام و کارت تماس تفکیک کن. "
                         + "برای phoneNumber مهم‌ترین معیار شباهت دقیق شکل هر رقم در تصویر است، نه معتبر به نظر رسیدن شماره. "
