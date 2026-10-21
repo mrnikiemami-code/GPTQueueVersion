@@ -197,7 +197,7 @@ def analyze_image_via_api(image_path, job_id=None):
     with requests.Session() as session:
         session.trust_env = False  # Never route the localhost hop through a proxy.
         response = session.post(
-            url,
+            relay_url,
             headers=headers,
             json={
                 "model": VISION_API_MODEL,
