@@ -21,7 +21,7 @@ function sleep(ms) {
 
 let lastCommandId = null;
 
-const VISION_ARTIFACT_TIMEOUT_MS = 100000;
+const VISION_ARTIFACT_TIMEOUT_MS = 140000;
 const VISION_BUSY_EXPIRE_MS = 150000;
 const VISION_BUSY_STORAGE_KEY = "chatgpt_queue_vision_busy_v1";
 const VISION_RESULT_DOCUMENT_NAME = "vision-result.task.md";
@@ -2122,7 +2122,7 @@ async function waitForVisionResultDocument(
 
     // Keep existing no-result behavior and exact timeout error unchanged.
     throw new Error(
-        expectedName + " document was not available within 100 seconds."
+        expectedName + " document was not available within 140 seconds."
     );
 }
 
