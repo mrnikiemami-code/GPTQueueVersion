@@ -8,6 +8,7 @@ import ctypes
 import requests
 import base64
 import mimetypes
+from urllib.parse import unquote
 import shutil
 import uuid
 import time
@@ -215,6 +216,17 @@ def analyze_image_via_api(image_path):
             item.get("text", "") for item in content
             if isinstance(item, dict) and item.get("type") == "text"
         )
+    # Accept an inline Markdown data: link returned by some API gateways.
+    # Do not follow URLs or change the existing Bridge parser.
+    if isinstance(content, str):
+        match = re.fullmatch(
+            r"\s*\[[^\]\r\n]*\]\(data:text/plain;charset=utf-8,([^)]*)\)\s*",
+            content,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            content = unquote(match.group(1))
+            print("VISION API DATA LINK DECODED:", "length=", len(content))
     return normalize_data(extract_json_from_text(content))
 
 
