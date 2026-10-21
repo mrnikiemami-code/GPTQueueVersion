@@ -2423,10 +2423,6 @@ def _duplicate_message_from_response(data, google_response):
     )
 
 
-# Only a notification handoff; the Vision queue and processing remain shared.
-_retry_progress_messages = {}
-
-
 async def retry_job_by_id(update, job_id, application=None):
     user_id = get_telegram_user_id(update)
 
@@ -2705,11 +2701,8 @@ async def retry_job_by_id(update, job_id, application=None):
                     update.message.reply_text(message),
                     timeout=TELEGRAM_STATUS_MESSAGE_TIMEOUT_SECONDS,
                 )
-            if receipt and receipt.message_id:
-                _retry_progress_messages[job_id] = (
-                    int(receipt.chat_id), int(receipt.message_id)
-                )
-                print("VISION RETRY RECEIPT:", job_id, receipt.message_id)
+            # Retry uses the same worker progress message as a new photo.
+            # The queue receipt is only an acknowledgement, never the timer.
         except Exception as ex:
             print("VISION RETRY RECEIPT WARNING:", job_id, repr(ex))
             if update.callback_query:
@@ -4346,30 +4339,6 @@ async def _start_vision_progress(
     chat_id,
     job_id
 ):
-    receipt = _retry_progress_messages.pop(job_id, None)
-    if receipt is not None and receipt[0] == int(chat_id):
-        try:
-            await asyncio.wait_for(
-                application.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=receipt[1],
-                    text=_vision_progress_text(
-                        job_id, VISION_PROGRESS_WINDOW_SECONDS,
-                    ),
-                ),
-                timeout=TELEGRAM_STATUS_MESSAGE_TIMEOUT_SECONDS,
-            )
-            message_id = receipt[1]
-            task = application.create_task(
-                _vision_progress_loop(
-                    application.bot, chat_id, message_id, job_id,
-                )
-            )
-            print("VISION RETRY PROGRESS STARTED:", job_id, message_id)
-            return message_id, task
-        except Exception as ex:
-            print("VISION RETRY PROGRESS EDIT WARNING:", job_id, repr(ex))
-
     try:
         message = await asyncio.wait_for(
             application.bot.send_message(
